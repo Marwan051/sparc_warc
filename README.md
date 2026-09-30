@@ -141,8 +141,8 @@ Byte limits below are integers in **bytes**.
 | `WORKER_MAX_RESULT_BYTES` | `4194304` | Candidate JSON payload budget (4 MiB) |
 | `WORKER_MAX_INPUT_BYTES` | `33554432` | Compressed cursor-advance budget (32 MiB) |
 | `WORKER_MAX_SECONDS` | `120` | Task time budget checked between records |
-| `MAX_HTML_BYTES` | `2097152` | Maximum decoded HTML body (2 MiB) |
-| `MAX_ARTICLE_BYTES` | `524288` | Maximum serialized article (512 KiB) |
+| `MAX_HTML_BYTES` | `4194304` | Maximum decoded HTML body (4 MiB) |
+| `MAX_ARTICLE_BYTES` | `1048576` | Maximum serialized article (1 MiB) |
 | `MIN_WORD_COUNT` | `80` | Minimum extracted article words |
 | `USE_TRAFILATURA` | `1` | Main-content extraction before selectolax fallback |
 | `LINGUA_MIN_CONFIDENCE` | `0.5` | Minimum language confidence |

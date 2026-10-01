@@ -3,7 +3,7 @@ import re
 import json
 from typing import Dict, Any, List
 from selectolax.parser import HTMLParser
-from utils import decode_and_validate, is_valid_arabic_text
+from ingestion.text import decode_and_validate, is_valid_arabic_text
 
 ARABIC_PATTERN = re.compile(r'[\u0600-\u06FF]')
 LATIN_PATTERN = re.compile(r'[a-zA-Z]')

@@ -1,1 +1,1 @@
-"""PostgreSQL ingestion helpers."""
+"""PostgreSQL persistence and database inspection."""

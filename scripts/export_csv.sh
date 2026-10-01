@@ -2,11 +2,12 @@
 # Export important article tables to CSV, then copy to the HGFS share.
 # Usage:
 #   export PGHOST=... PGPORT=... PGDATABASE=... PGUSER=... PGPASSWORD=...
-#   ./export_csv.sh [csv_dir] [dest_dir]
-# Defaults: csv_dir=./warcdb_csv  dest_dir=/mnt/hgfs/copy_path/warcdb_csv
+#   ./scripts/export_csv.sh [csv_dir] [dest_dir]
+# Defaults: csv_dir=<project>/exports  dest_dir=/mnt/hgfs/copy_path/warcdb_csv
 set -euo pipefail
 
-CSV_DIR="${1:-./warcdb_csv}"
+PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+CSV_DIR="${1:-$PROJECT_ROOT/exports}"
 DEST_DIR="${2:-/mnt/hgfs/copy_path/warcdb_csv}"
 export PGHOST="${PGHOST:-localhost}"
 export PGPORT="${PGPORT:-5432}"

@@ -1,2 +1,0 @@
--r requirements.txt
-warcio>=1.7,<2

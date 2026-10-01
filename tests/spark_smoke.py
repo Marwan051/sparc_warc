@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 import uuid
+import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
 
@@ -20,15 +21,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from pyspark.sql import SparkSession
 import psycopg2
 from tests.test_ingestion import make_warc
-import stream_to_db as job
+from ingestion import pipeline as job
 from db import db_handler as db
 
 
 def timed_chunk(task):
     import time
-    import stream_to_db
+    from ingestion import pipeline
     start = time.time()
-    result = stream_to_db.process_file_chunk(task)
+    result = pipeline.process_file_chunk(task)
     result['stats']['wall_start'] = start
     result['stats']['wall_end'] = time.time()
     return result
@@ -61,7 +62,14 @@ def main():
     spark = SparkSession.builder.appName('WARC-v2-fixture-smoke').getOrCreate()
     spark.sparkContext.setLogLevel('ERROR')
     # Imported task functions must be available to the real Python workers.
-    spark.sparkContext.addPyFile(str(Path(job.__file__)))
+    code_directory = tempfile.TemporaryDirectory()
+    code_archive = Path(code_directory.name) / 'project_code.zip'
+    root = Path(__file__).resolve().parents[1]
+    with zipfile.ZipFile(code_archive, 'w') as archive:
+        for package in ('ingestion', 'db', 'chunking'):
+            for source in (root / package).rglob('*.py'):
+                archive.write(source, source.relative_to(root))
+    spark.sparkContext.addPyFile(str(code_archive))
     try:
         with patch.object(db, 'get_connection', side_effect=connect), patch.object(job, 'get_spark_session', return_value=spark), \
              patch.object(spark, 'stop'), patch.object(job, 'process_file_chunk', timed_chunk):
@@ -88,6 +96,7 @@ def main():
                 worker_peak_rss_mib=[s['python_peak_rss_mib'] for s in first_wave])))
     finally:
         spark.stop()
+        code_directory.cleanup()
         server.shutdown(); server.server_close()
         with admin.cursor() as cur: cur.execute('DROP SCHEMA ' + schema + ' CASCADE')
         admin.close()

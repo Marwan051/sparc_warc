@@ -1,4 +1,25 @@
-# Validation — 2026-09-30 (updated with YARN results)
+# Validation
+
+## Project restructuring — 2026-10-01
+
+After organizing the application into top-level `ingestion/`, `db/`, and
+`chunking/` packages:
+
+- `.venv/bin/python -m unittest discover -s tests -v`: 32 tests,
+  17 passed and 15 skipped (12 require `WARC_TEST_DSN`; 3 require optional
+  LangChain dependencies).
+- `scripts/run_ingestion.sh` passed dry run from outside the repository without
+  packaging or starting Spark. Legacy root wrappers have been removed.
+- Application modules and `scripts/ingest.py` passed dry run using an isolated
+  worker ZIP outside the checkout, with optional LangChain imports blocked.
+- All three files in `requirements/` parsed locally with their relative includes.
+- CSV exports now live in `exports/`; generated Spark archives stay in `.build-tmp/`.
+- Python syntax, shell syntax, and `git diff --check` passed.
+
+Live PostgreSQL, Spark/YARN, and full virtual-environment relocation checks were
+not rerun for this restructuring. The results below describe the earlier layout.
+
+## Historical validation — 2026-09-30 (updated with YARN results)
 
 Implementation, local validation, and distributed YARN validation are complete.
 No production ingestion was started; YARN runs used an isolated test schema

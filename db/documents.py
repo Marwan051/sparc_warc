@@ -1,8 +1,8 @@
-import sys
+"""Load stored articles as streaming LangChain documents."""
+
 import os
-from typing import Iterable, Iterator, List, Optional
+from typing import Iterator, List, Optional
 from langchain_core.documents import Document
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from db.db_handler import get_connection
 
@@ -77,18 +77,3 @@ def load_documents_distributed(limit: Optional[int] = None) -> List[Document]:
         raise ValueError("set RAG_DOCUMENT_LIMIT or pass limit= to use the eager loader")
     return list(iter_documents(limit=limit))
 
-
-def iter_document_chunks(
-    documents: Iterable[Document], chunk_size: int = 800, chunk_overlap: int = 100
-) -> Iterator[Document]:
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-        separators=["\n\n", "\n", ".", " ", ""],
-    )
-    for document in documents:
-        yield from splitter.split_documents([document])
-
-
-def split_documents_into_chunks(documents: List[Document], chunk_size: int = 800, chunk_overlap: int = 100) -> List[Document]:
-    return list(iter_document_chunks(documents, chunk_size, chunk_overlap))

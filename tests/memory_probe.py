@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tests.test_ingestion import make_warc, task, Response
-import stream_to_db as job
+from ingestion import pipeline as job
 
 body = ('<html><body><p>' + 'The government published a report on public transport and the local economy. ' * 4000 + '</p></body></html>').encode()
 data, _ = make_warc(20, payload=body)

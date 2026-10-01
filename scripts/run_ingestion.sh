@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_ROOT"
 VENV_DIR="${VENV_DIR:-$PROJECT_ROOT/.venv}"
 if [ ! -x "$VENV_DIR/bin/python" ]; then
@@ -10,24 +10,26 @@ fi
 VENV_DIR="$(cd "$VENV_DIR" && pwd)"
 export RAYON_NUM_THREADS=1 OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
 # Validate before packaging, network access, database access, or Spark startup.
-"$VENV_DIR/bin/python" -c 'from stream_to_db import load_config; load_config()'
+"$VENV_DIR/bin/python" -c 'from ingestion.pipeline import load_config; load_config()'
 if [ "${DRY_RUN:-0}" = 1 ]; then
-    exec "$VENV_DIR/bin/python" stream_to_db.py
+    exec "$VENV_DIR/bin/python" -m ingestion.pipeline
 fi
-TASK_TMP="$(mktemp -d "$PROJECT_ROOT/.pack-XXXXXX")"
+BUILD_DIR="$PROJECT_ROOT/.build-tmp"
+mkdir -p "$BUILD_DIR"
+TASK_TMP="$(mktemp -d "$BUILD_DIR/pack-XXXXXX")"
 trap 'rm -rf "$TASK_TMP"' EXIT
 ZIP="$TASK_TMP/project_code.zip"
-zip -qr "$ZIP" extractors parsers db utils.py -x '*/__pycache__/*' '*.pyc'
+zip -qr "$ZIP" ingestion db chunking -x '*/__pycache__/*' '*.pyc'
 
 # Hash installed distributions as well as declared dependencies and Python.
 VENV_FINGERPRINT="$(
     {
-        cat requirements.txt "$VENV_DIR/pyvenv.cfg"
+        cat requirements/base.txt "$VENV_DIR/pyvenv.cfg"
         "$VENV_DIR/bin/python" -c 'import importlib.metadata as m, sysconfig; print("\n".join(sorted(d.metadata["Name"] + "==" + d.version for d in m.distributions(path=[sysconfig.get_path("purelib")]))))'
         "$VENV_DIR/bin/python" -c 'import sys; print(sys.version); print(sys.executable)'
     } | sha256sum | cut -d ' ' -f 1
 )"
-VENV_ARCHIVE="$PROJECT_ROOT/pyspark_venv-${VENV_FINGERPRINT}.tar.gz"
+VENV_ARCHIVE="$BUILD_DIR/pyspark_venv-${VENV_FINGERPRINT}.tar.gz"
 if [ ! -f "$VENV_ARCHIVE" ]; then
     echo "Packing worker environment..."
     "$VENV_DIR/bin/python" -m venv_pack -p "$VENV_DIR" -o "$TASK_TMP/environment.tar.gz"
@@ -55,7 +57,7 @@ if [ "${USE_HDFS_CACHE:-1}" = 1 ] && hdfs dfs -test -e / >/dev/null 2>&1; then
     fi
     : "${SPARK_HOME:?Set SPARK_HOME to the cluster Spark installation}"
     JARS_HASH="$(find "$SPARK_HOME/jars" -maxdepth 1 -name '*.jar' -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d ' ' -f 1)"
-    JARS_ARCHIVE="$PROJECT_ROOT/spark-libs-$JARS_HASH.zip"
+    JARS_ARCHIVE="$BUILD_DIR/spark-libs-$JARS_HASH.zip"
     if [ ! -f "$JARS_ARCHIVE" ]; then
         (cd "$SPARK_HOME/jars" && zip -qr "$TASK_TMP/spark-libs.zip" .)
         mv "$TASK_TMP/spark-libs.zip" "$JARS_ARCHIVE"
@@ -81,4 +83,4 @@ spark-submit \
     --conf spark.executorEnv.OPENBLAS_NUM_THREADS=1 \
     --conf "spark.pyspark.driver.python=$VENV_DIR/bin/python" \
     --conf "spark.pyspark.python=$PYSPARK_PYTHON" \
-    "${EXTRA_CONF[@]}" --archives "$ARCHIVES_SPEC" --py-files "$ZIP" stream_to_db.py
+    "${EXTRA_CONF[@]}" --archives "$ARCHIVES_SPEC" --py-files "$ZIP" scripts/ingest.py

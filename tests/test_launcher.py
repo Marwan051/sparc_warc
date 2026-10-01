@@ -17,6 +17,9 @@ class LauncherTests(unittest.TestCase):
             env = dict(os.environ, PATH=directory+':'+os.environ['PATH'], DRY_RUN='1',
                        VENV_DIR=str(Path(sys.executable).absolute().parent.parent),
                        MAX_ACCEPTED_ARTICLES='17')
-            result = subprocess.run(['bash',str(root/'run_to_db.sh')],env=env,text=True,capture_output=True)
-            self.assertEqual(result.returncode,0,result.stderr)
-            self.assertIn('"target_articles": 17',result.stdout)
+            result = subprocess.run(
+                ['bash', str(root / 'scripts/run_ingestion.sh')], cwd=directory,
+                env=env, text=True, capture_output=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('"target_articles": 17', result.stdout)

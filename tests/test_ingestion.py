@@ -17,11 +17,11 @@ from warcio.warcwriter import WARCWriter
 from warcio.statusandheaders import StatusAndHeaders
 import psycopg2
 
-import stream_to_db as job
+from ingestion import pipeline as job
 from db import db_handler as db
-from parsers.parsers import parse_warc_records_streaming, ValidatedGzipStream
-from extractors.extractors import extract_html_fields, _language_sample
-from utils import decode_and_validate
+from ingestion.warc import parse_warc_records_streaming, ValidatedGzipStream
+from ingestion.extraction import extract_html_fields, _language_sample
+from ingestion.text import decode_and_validate
 
 
 def make_warc(count=6, payload=None, content_type='text/html', http_encoding=None):
@@ -217,7 +217,7 @@ class UnitTests(unittest.TestCase):
         self.assertFalse(result['eof'])
 
     def test_actual_language_detector(self):
-        from extractors.extractors import detect_languages_batch
+        from ingestion.extraction import detect_languages_batch
         texts = [
             'The government announced new measures to improve public transportation. Local officials said the changes would reduce traffic and make daily journeys easier for residents.',
             'Les élèves français étudient les événements récents et découvrent une société développée. Le gouvernement a annoncé de nouvelles mesures pour améliorer les transports publics.',

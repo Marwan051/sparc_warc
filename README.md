@@ -1,10 +1,38 @@
-# CC-NEWS Article Ingestion
+# News RAG Pipeline
 
 Stream Common Crawl News archives into PostgreSQL using Apache Spark. The pipeline
 extracts article text and metadata, keeps Arabic, English, and French content, and
 counts only newly committed articles toward your requested quotas.
 
-[Architecture](ARCHITECTURE.md) · [Validation results](VALIDATION.md)
+[Architecture](docs/architecture.md) · [Validation results](docs/validation.md)
+
+## Project layout
+
+```text
+ingestion/                Spark pipeline, WARC parsing, extraction, text validation
+db/                       PostgreSQL persistence, document loading, inspection
+chunking/                 Incremental text splitters
+scripts/                  Ingestion, database inspection, and CSV export commands
+tests/                    Unit tests and integration/smoke checks
+docs/                     Architecture and recorded validation
+exports/                  Existing CSV exports
+requirements/             base.txt, rag.txt, dev.txt dependency sets
+```
+
+Keep feature modules at the repository root and operational commands in
+`scripts/`. Add `retrieval/` when its implementation is ready; there are no empty
+placeholder packages. Package initializers stay lightweight so ingestion does not
+require optional RAG dependencies. See the
+[module boundaries](docs/architecture.md#module-boundaries) for extension guidance.
+
+All commands live in `scripts/`; the former root wrappers have been removed.
+Use `scripts/run_ingestion.sh`, `scripts/inspect_db.sh`, and
+`scripts/export_csv.sh`. Import loading and splitting helpers directly from
+`db.documents` and `chunking.splitters`. `scripts/ingest.py` is the entry point
+passed to Spark by the launcher.
+
+The existing `db/db_handler.py` path is retained; the former `extractors`,
+`parsers`, and `utils` implementations now live together under `ingestion/`.
 
 ## Setup
 
@@ -15,13 +43,21 @@ virtual environment. The launcher also requires `zip`.
 
 ```bash
 python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m pip install -r requirements/base.txt
 export SPARK_HOME=/opt/spark
 export PATH="$SPARK_HOME/bin:$PATH"
 ```
 
 Use the cluster's `spark-submit`; it supplies PySpark. Set `VENV_DIR` to use a
 virtual environment other than `.venv`.
+
+Dependency files are grouped by use: `requirements/base.txt` for ingestion,
+`requirements/rag.txt` for ingestion plus document/chunking support, and
+`requirements/dev.txt` for ingestion plus test dependencies. Install both the
+RAG and development files to run optional RAG tests.
+
+Generated worker environments, Spark JAR archives, and temporary packaging files
+stay in `.build-tmp/` (ignored by Git).
 
 The database and role must already exist. The application creates and migrates its
 tables, so the role needs schema permissions. Connection defaults are:
@@ -32,7 +68,7 @@ export PGDATABASE=warcdb PGUSER=warc_user PGPASSWORD=password
 ```
 
 Override these environment variables for another database. The VMware host helpers
-[cluster_up.sh](cluster_up.sh) and [cluster_down.sh](cluster_down.sh) start and stop
+`cluster_up.sh` and `cluster_down.sh` start and stop
 the VMs and Hadoop services; run them on the Debian host, not inside a VM.
 
 ## Run
@@ -40,7 +76,7 @@ the VMs and Hadoop services; run them on the Debian host, not inside a VM.
 Request 1,000 new articles, with a maximum of 100 from each source file:
 
 ```bash
-NUM_FILES=all MAX_ACCEPTED_ARTICLES=1000 MAX_ACCEPTED_PER_FILE=100 ./run_to_db.sh
+NUM_FILES=all MAX_ACCEPTED_ARTICLES=1000 MAX_ACCEPTED_PER_FILE=100 ./scripts/run_ingestion.sh
 ```
 
 Duplicates, rejected articles, and unsuccessful inserts do not consume quota.
@@ -50,13 +86,13 @@ files until the total is reached or the sources are exhausted.
 For a small smoke test:
 
 ```bash
-NUM_FILES=1 MAX_ACCEPTED_ARTICLES=10 MAX_ACCEPTED_PER_FILE=10 ./run_to_db.sh
+NUM_FILES=1 MAX_ACCEPTED_ARTICLES=10 MAX_ACCEPTED_PER_FILE=10 ./scripts/run_ingestion.sh
 ```
 
 To validate configuration without submitting a job:
 
 ```bash
-DRY_RUN=1 MAX_ACCEPTED_ARTICLES=1000 ./run_to_db.sh
+DRY_RUN=1 MAX_ACCEPTED_ARTICLES=1000 ./scripts/run_ingestion.sh
 ```
 
 The final summary reports committed counts, per-file status, rejection counters,
@@ -66,7 +102,7 @@ and `2` when the selected sources cannot fulfill the target.
 ## Resume
 
 ```bash
-RESUME_RUN_ID=<printed-run-id> ./run_to_db.sh
+RESUME_RUN_ID=<printed-run-id> ./scripts/run_ingestion.sh
 ```
 
 Resume restores the original file selection, quotas, and filtering settings.
@@ -114,7 +150,7 @@ Default waves return approximately 12 MiB of candidate payload at most. Total
 memory also includes Python, JVMs, models, and HTML processing. Reduce concurrency
 or result budgets to lower memory pressure; keep the result budget at least as
 large as `MAX_ARTICLE_BYTES`. Input/time limits can overshoot by a record and parser
-lookahead. See [memory bounds](ARCHITECTURE.md#memory-bounds) for details.
+lookahead. See [memory bounds](docs/architecture.md#memory-bounds) for details.
 
 Set `NO_PROGRESS=1` to hide the progress bar and wave output. `USE_HDFS_CACHE=1`
 shares packaged dependencies and Spark jars under `HDFS_APPS_DIR` (default:
@@ -126,25 +162,26 @@ shares packaged dependencies and Spark jars under `HDFS_APPS_DIR` (default:
 After a run finishes:
 
 ```bash
-.venv/bin/python db_inspect.py
-./export_csv.sh
+./scripts/inspect_db.sh
+./scripts/export_csv.sh
 ```
 
-The export writes the five article tables to `./warcdb_csv/` and copies them to
+The export writes the five article tables to `exports/` under the project root and copies them to
 `/mnt/hgfs/copy_path/warcdb_csv/`. Optional arguments override both directories:
 
 ```bash
-./export_csv.sh ./warcdb_csv /path/to/destination
+./scripts/export_csv.sh ./exports /path/to/destination
 ```
 
 ## RAG integration
 
 Install the optional dependencies with
-`.venv/bin/python -m pip install -r requirements-rag.txt`, then consume documents
+`.venv/bin/python -m pip install -r requirements/rag.txt`, then consume documents
 and chunks incrementally:
 
 ```python
-from rag_loader import iter_documents, iter_document_chunks
+from db.documents import iter_documents
+from chunking.splitters import iter_document_chunks
 
 for chunk in iter_document_chunks(iter_documents()):
     print(chunk.metadata["doc_id"])
@@ -156,11 +193,11 @@ for chunk in iter_document_chunks(iter_documents()):
 ## Tests
 
 ```bash
-.venv/bin/python -m pip install -r requirements-dev.txt
+.venv/bin/python -m pip install -r requirements/dev.txt
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
 Set `WARC_TEST_DSN` to a disposable PostgreSQL database to enable integration tests;
 these create and drop isolated schemas. Optional RAG tests require the RAG
-dependencies. See [VALIDATION.md](VALIDATION.md) for recorded local and YARN results
+dependencies. See [validation results](docs/validation.md) for recorded local and YARN results
 and the [test scripts](tests/) for Spark, memory, and packaging checks.

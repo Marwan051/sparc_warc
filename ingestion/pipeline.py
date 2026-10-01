@@ -30,9 +30,9 @@ from db.db_handler import (
     load_run_files,
     resume_run,
 )
-from extractors.extractors import detect_languages_batch, extract_html_fields
-from parsers.parsers import parse_warc_records_streaming, ValidatedGzipStream
-from utils import is_target_language
+from ingestion.extraction import detect_languages_batch, extract_html_fields
+from ingestion.warc import parse_warc_records_streaming, ValidatedGzipStream
+from ingestion.text import is_target_language
 
 
 def _env_int(name, default, *, minimum=0):
@@ -464,7 +464,7 @@ def _summary(run_id, config, conn):
                         totals[key] = totals.get(key, 0) + value
         print("Counters: " + json.dumps(totals, sort_keys=True))
     conn.rollback()
-    print(f"Resume command: RESUME_RUN_ID={run_id} ./run_to_db.sh")
+    print(f"Resume command: RESUME_RUN_ID={run_id} ./scripts/run_ingestion.sh")
 
 
 def run_streaming_pipeline():
@@ -500,7 +500,7 @@ def run_streaming_pipeline():
             bar = _make_progress_bar(_bar_total(config["target_articles"], config["per_file_target"],
                                                 len(urls)),
                                      0, not config["no_progress"])
-        print(f"Resume command: RESUME_RUN_ID={run_id} ./run_to_db.sh")
+        print(f"Resume command: RESUME_RUN_ID={run_id} ./scripts/run_ingestion.sh")
         wave = 0
         invocation = uuid.uuid4().hex
         while True:
@@ -574,10 +574,15 @@ def run_streaming_pipeline():
             lock_conn.close()
 
 
-if __name__ == "__main__":
+def main():
+    """Run the ingestion command and report fatal errors consistently."""
     try:
         sys.exit(run_streaming_pipeline())
     except Exception as error:
         stamp = datetime.now(timezone.utc).isoformat()
         print(f"[{stamp}] FATAL {type(error).__name__}: {error}", file=sys.stderr)
         sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

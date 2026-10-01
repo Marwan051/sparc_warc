@@ -4,7 +4,7 @@ The pipeline separates parallel article processing from transactional database
 writes. Spark workers download, extract, and classify; the driver schedules work
 and owns all PostgreSQL writes.
 
-[Usage and configuration](README.md) · [Validation results](VALIDATION.md)
+[Usage and configuration](../README.md) · [Validation results](validation.md)
 
 ## Data flow
 
@@ -107,21 +107,52 @@ memory must be assessed through cluster metrics.
 
 The launcher packages Python dependencies and project modules for YARN. Environment
 and Spark-jar fingerprints select reusable archives on HDFS; temporary uploads are
-renamed into place. Code is packaged each launch. Shared archives are retained until
+renamed into place. Code is packaged each launch. Local archives and packaging workspaces live in
+`.build-tmp/`. Shared archives are retained until
 manual maintenance removes unused versions.
+
+## Module boundaries
+
+The application uses top-level feature packages. Run Python module commands from
+the project root; no editable install or extra source path is needed. Spark's
+`--py-files` archive contains `ingestion/`, `db/`, and `chunking/`, preserving the
+same imports on workers. The launcher resolves the project root itself and can
+be invoked from another directory.
+
+- **ingestion** coordinates Spark and transforms WARC records into article rows.
+  It uses `db` but does not import chunking or optional RAG dependencies.
+- **db** owns connections, schema, writes, ingestion checkpoints, and inspection.
+  Its `documents.py` module streams stored articles as LangChain Documents while
+  retaining source metadata and cursor cleanup.
+- **chunking** accepts Documents and yields chunks without loading the corpus or
+  accessing PostgreSQL. Add alternative splitters here and preserve provenance
+  in metadata.
+
+Create `retrieval/` when indexing, search, or ranking code is added. Keep backend
+adapters with that feature and compose stages at their entry points. Package
+imports should not open connections, load models, or run jobs.
+
+Keep optional dependencies separate from ingestion requirements. Add new tests
+under `tests/`; put operational launchers in `scripts/`. The ingestion module
+retains its configuration and scheduling logic to preserve behavior during this
+structural change.
+
+Ingestion **chunks** are bounded worker results and commit receipts. RAG text
+**chunks** are document fragments produced by `chunking`; these are distinct concepts.
 
 ## Code map
 
 | File | Responsibility |
 |---|---|
-| [stream_to_db.py](stream_to_db.py) | Configuration, scheduling, workers, progress, and run lifecycle |
-| [db/db_handler.py](db/db_handler.py) | Schema, locking, inserts, and durable ingestion state |
-| [parsers/parsers.py](parsers/parsers.py) | Streaming WARC parsing and gzip validation |
-| [extractors/extractors.py](extractors/extractors.py) | Article text, metadata, and language detection |
-| [utils.py](utils.py) | Encoding and language validation |
-| [run_to_db.sh](run_to_db.sh) | Packaging and YARN submission |
-| [rag_loader.py](rag_loader.py) | Streaming database documents and text chunks |
-| [db_inspect.py](db_inspect.py), [export_csv.sh](export_csv.sh) | Inspection and post-run CSV export |
+| [ingestion/pipeline.py](../ingestion/pipeline.py) | Configuration, scheduling, workers, progress, and run lifecycle |
+| [db/db_handler.py](../db/db_handler.py) | Schema, locking, inserts, and durable ingestion state |
+| [ingestion/warc.py](../ingestion/warc.py) | Streaming WARC parsing and gzip validation |
+| [ingestion/extraction.py](../ingestion/extraction.py) | Article text, metadata, and language detection |
+| [ingestion/text.py](../ingestion/text.py) | Encoding and language validation |
+| [scripts/run_ingestion.sh](../scripts/run_ingestion.sh), [scripts/ingest.py](../scripts/ingest.py) | Packaging and YARN submission |
+| [db/documents.py](../db/documents.py) | Streaming database documents |
+| [chunking/splitters.py](../chunking/splitters.py) | Incremental document splitting |
+| [scripts/inspect_db.sh](../scripts/inspect_db.sh), [scripts/export_csv.sh](../scripts/export_csv.sh) | Inspection and post-run CSV export |
 
 Extraction can leave residual site boilerplate. Downstream RAG processing may need
 to filter repetitive footer or subscription text before indexing.

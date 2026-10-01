@@ -1,213 +1,127 @@
-# spark_warc_v2 — How It All Works
+# Architecture
 
-Plain-language guide to the CC-NEWS → PostgreSQL → RAG pipeline.
-Companion to `README.md` (operator manual) and `VALIDATION.md` (proof).
+The pipeline separates parallel article processing from transactional database
+writes. Spark workers download, extract, and classify; the driver schedules work
+and owns all PostgreSQL writes.
 
-## The big picture
+[Usage and configuration](README.md) · [Validation results](VALIDATION.md)
 
-Common Crawl News publishes monthly lists (`warc.paths.gz`) of WARC files.
-This project downloads those files, pulls out real news articles in Arabic,
-English, and French, and stores them in PostgreSQL — ready for RAG.
+## Data flow
 
-Golden rule: **workers download and read; the driver writes to the database.**
-The driver never touches WARC bytes. Workers never touch Postgres.
-
+```mermaid
+flowchart LR
+    M[CC-NEWS manifest] --> D[Driver: allocate quotas]
+    D --> W[Up to 3 file tasks]
+    S[WARC files over HTTP] --> W
+    W --> E[Parse, extract, classify]
+    E --> R[Bounded candidates and cursor]
+    R --> C[Driver: commit chunk]
+    C --> P[(PostgreSQL)]
+    P --> D
+    P --> L[Streaming RAG loader]
+    P --> X[CSV export after run]
 ```
-manifest → waves of ≤3 file-tasks (driver plans, Spark delivers)
-         → workers stream + extract + classify
-         → driver commits each chunk in one transaction
-         → warcdb_csv/ → RAG
-```
 
-## How a run flows (simple version)
+A **wave** is a bounded set of file tasks executed concurrently. A **chunk** is one
+task's result: qualifying candidates, the next source offset, and processing
+statistics. The driver waits for the wave to finish, commits its chunks, then
+schedules the next wave from persisted state.
 
-Think of the driver as a boss handing out work slips, one round ("wave") at a time.
-Workers remember nothing — the driver's notebook (database) remembers everything.
+## Quota enforcement
 
-1. **Check the notebook** (`load_run` + `load_run_files`): per file, where it
-   stopped (byte cursor) and how many articles it already gave.
-2. **Write up to 3 slips** (`_allocate_tasks`): each slip = file URL + byte
-   offset to continue from + how many articles are still needed.
-3. **Hand them out** (`parallelize(tasks).map(process_file_chunk).collect()`):
-   one slip per worker, all at once; the driver waits for all three to return.
-4. **File the results** (`commit_chunk` per chunk): save new articles, advance
-   each file's cursor. Duplicates and rejects don't count toward quotas.
+The driver assigns each task a candidate allowance constrained by its file's
+remaining quota. Allowances across the wave never exceed the remaining global
+target. Workers may return fewer candidates when they reach EOF or a resource limit.
 
-Repeat until every file gave its quota or ran out of file. A slip is just text
-(URL + byte number) — the worker downloads the bytes itself over HTTP
-(`Range: bytes=<cursor>-`). The driver only ever receives extracted text.
+PostgreSQL decides which candidates are new using the unique WARC record ID and
+`ON CONFLICT DO NOTHING RETURNING`. Only articles whose page, metadata, and content
+commit successfully count toward quotas. Duplicates and rejected rows leave room
+for subsequent waves. Per-file quotas apply within a run.
 
-Exit codes: `0` target met · `1` failure · `2` sources can't fill the target.
+## Worker processing
 
-## `stream_to_db.py` func by func (583 lines)
+Each task streams from a saved compressed offset and processes records through:
 
-**Config**
-- `_env_int` — reads an int env var, rejects garbage/negatives at startup.
-- `_parse_num_files` — `NUM_FILES`: `all`/`0`/empty = whole manifest, else a
-  positive int (default 15).
-- `load_config` — builds all settings from env (quotas, worker budgets,
-  filters, resume/dry-run). Guardrails: unknown `MAX_EXTRACTED_PER_ROUND`
-  errors out, `MAX_FILES_PER_ROUND` clamped to 3 (your executor count),
-  `MAX_ARTICLE_BYTES ≤ WORKER_MAX_RESULT_BYTES` enforced.
+1. **Parsing:** FastWARC reads record boundaries; gzip validation checks integrity.
+2. **Extraction:** decode HTML, preserve author/date metadata, then extract main
+   content with trafilatura or fall back to selectolax.
+3. **Filtering:** enforce size and word limits, classify with Lingua, and retain
+   Arabic, English, or French articles that pass the script checks.
+4. **Result assembly:** return candidates within the assigned count and byte limits,
+   plus a cursor and counters. A candidate that would overflow the result buffer
+   is revisited by the next task.
 
-**Spark/network helpers**
-- `get_spark_session` — session `CC-NEWS-Bounded-Ingest` (16 MiB direct-result
-  cap, worker reuse; `SPARK_MASTER_URL` override for local tests).
-- `_sleep_backoff` — 2s/4s/8s… capped 30s between retries.
-- `_transient` — retryable? HTTP 408/429/5xx + timeouts/connection errors yes;
-  404/bad config no.
-- `fetch_manifest` — downloads `warc.paths.gz` for YEAR/MONTH, slices
-  `[offset : offset+num_files]`, returns full data.commoncrawl.org URLs.
-- `_content_total` — true file size from `Content-Range`/`Content-Length`, so
-  resume spots "cursor beyond EOF".
+Python workers reuse a cached 20-language detector. Language samples cover the
+beginning, middle, and end of the article. Saved provenance includes the source
+file, WARC date, and extraction method; Arabic dialect is left unknown.
 
-**Worker side (runs on executors)**
-- `_record_id` — dedup key: WARC record ID, or `gen-<hash>` fallback.
-- `_candidate` — shapes one article dict (IDs, title/author/date, text,
-  counts, language); strips NUL bytes Postgres rejects.
-- `_process_file_once(task)` — the worker heart: ranged download, validate
-  status/`Content-Range`/ETag/Last-Modified, walk records one by one
-  (skip non-HTML/oversized → extract → drop short → Lingua detect → drop
-  non-ar/en/fr → build candidate). Always returns a checkpoint
-  (`next_offset` = exact record boundary). If the server ignores `Range`, it
-  replays from 0 to the saved boundary.
-- `process_file_chunk(task)` — retry wrapper (≤ `MAX_RETRIES` on transient
-  errors) + stamps `python_peak_rss_mib`/`worker_host`/`worker_pid`. Permanent
-  failure returns an error dict with the cursor unmoved — nothing skipped.
+## Transactions and recovery
 
-**Driver scheduling**
-- `_allocate_tasks` — first ≤3 pending files; splits remaining global quota
-  fairly (`ceil(remaining/slots_left)`), caps each by per-file remainder.
-  `chunk_id = sha256(run + file + offset + wave)` makes retried commits
-  idempotent.
-- `_print_config` — `DRY_RUN` output.
+A session advisory lock allows **one ingestion coordinator per database**. The
+driver reuses that connection and commits each chunk as one transaction containing
+article rows, quota counters, file state, and a chunk receipt. `DB_BATCH_SIZE`
+controls SQL batch size within that transaction.
 
-**Progress display**
-- `_bar_total` / `_make_progress_bar` — tqdm bar on stderr: global target if
-  set, else `per_file × num_files`, else count-up. `NO_PROGRESS=1` disables
-  bar and wave prints; missing tqdm falls back to wave prints.
+If a commit acknowledgement is lost, a retry checks the receipt before inserting
+again. Savepoints isolate malformed rows, with JSONL diagnostics written to
+`dead_letter/` (configurable through `DEAD_LETTER_DIR`). Persistent failures stop
+the run; failed chunks cannot advance the source cursor.
 
-**Resume/summary**
-- `SEMANTIC_ENV` + `restore_run_config` — resume reloads manifest/quotas/
-  filters and **errors** on conflicting overrides; only resource budgets may
-  change mid-run.
-- `_summary` — per-file counts/statuses, summed chunk counters, resume command.
+Resume restores persisted quotas and filtering settings and makes failed files
+eligible for retry. Operational budgets may change. File states distinguish
+`pending`, `quota_reached`, `eof`, and `failed`; run states distinguish `running`,
+`complete`, `shortfall`, and `failed`.
 
-**Main loop**
-- `run_streaming_pipeline` — dry-run → lock one coordinator →
-  new run or resume → wave loop (plan → scatter-gather → commit → report) →
-  `complete`/`shortfall`/`failed`. `finally` closes bar, stops Spark, releases
-  the lock.
+Source checkpoints use compressed record boundaries. HTTP Range and available
+source validators are checked; a server that ignores Range requires replay to the
+saved boundary. Only validated EOF exhausts a source. Resume requires one WARC
+record per gzip member. Legacy completed checkpoints are preserved, while legacy
+partial offsets restart from zero.
 
-## `db/db_handler.py` (425 lines) — driver only
+## Memory bounds
 
-- `_db_config` / `get_connection` — libpq env settings + local defaults.
-- `connection_scope` — reuse the coordinator connection or open a short one;
-  always rolls back strays and closes what it opened.
-- `init_db` — creates tables + additive migrations.
-- `extract_domain` — `https://www.bbc.com/x` → `bbc.com`.
-- `acquire_coordinator_lock` — advisory lock: one ingestion job per month.
-- `create_run` — one `ingest_runs` row (quotas + settings snapshot) + one
-  `ingest_run_files` row per URL (cursor 0, `pending`, or verified old
-  checkpoints).
-- `load_run` / `load_run_files` — the notebook reads (global + per-file).
-- `_insert_new_records` — dedup engine: `ON CONFLICT (warc_record_id)
-  DO NOTHING RETURNING`; only new rows get metadata + content.
-- `_write_diagnostic` / `_insert_isolated` — bad rows go to `dead_letter/`
-  JSONL via savepoints; one bad row never kills its chunk.
-- `resume_run` — `failed` files back to `pending`, run reopened.
-- `commit_chunk` — idempotent (known chunk IDs return stored count), locks
-  run + file rows, rejects stale cursors/over-quota chunks, inserts, advances
-  cursor, sets `pending`/`eof`/`quota_reached`/`failed`. All or nothing.
-- `finish_run` — stamps `complete`/`failed`/`shortfall`.
-- `load/upsert_ingest_progress` — legacy shared checkpoint table.
+Count limits are combined with byte limits. At the defaults, each task returns at
+most 4 MiB of candidate JSON payload and a three-task wave returns approximately
+12 MiB, plus serialization and result metadata. Decoded HTML is limited to 4 MiB;
+an individual serialized article is limited to 1 MiB. Oversized records are skipped.
 
-Tables: `websites`/`authors` (deduped names) → `pages` (one row/article,
-unique record ID) → `metadata` + `content` (details + text);
-`ingest_runs`/`ingest_run_files`/`ingest_chunks` (quotas, cursors, receipts);
-`ingest_files` (legacy checkpoints).
+These are payload bounds, not total process-memory limits. HTML trees, language
+models, Python, and the JVM require additional memory. Input/time budgets are
+checked between records, so a record, lookahead, or replayed prefix can exceed them.
 
-## `parsers/parsers.py` (84 lines)
+The launcher uses one core per executor, one native/model compute thread per
+worker, fixed executor allocation, and a 64 MiB driver result limit. Chunk statistics
+record Python peak RSS, processing time, bytes, and rejection counts. Full container
+memory must be assessed through cluster metrics.
 
-- `ValidatedGzipStream` — checks gzip CRC/trailers and `Content-Length` as
-  bytes flow (64 KiB sips, flat memory). Truncations raise instead of faking
-  a clean EOF.
-- `parse_warc_records_streaming` — FastWARC walk, one record at a time:
-  non-HTML → `non_html` skip; over-limit HTML → `oversized_html` skip (reads
-  limit+1 byte to prove it); else `{url, warc_date, charset, record_id,
-  raw_bytes, start_offset}`.
-- `parse_warc_stream_fastwarc` — alias for compatibility.
+## Storage and deployment
 
-## `extractors/extractors.py` (279 lines)
+| Tables | Responsibility |
+|---|---|
+| `websites`, `authors` | Shared article attributes |
+| `pages`, `metadata`, `content` | Article identity, descriptive fields, and text |
+| `ingest_runs`, `ingest_run_files` | Saved configuration, quotas, per-file progress |
+| `ingest_chunks` | Commit receipts and task statistics |
+| `ingest_files` | Source checkpoints shared across runs |
+| `ingest_schema_versions` | Applied schema migrations |
 
-- Script patterns + `get_lingua_detector` — Lingua brain (20 languages),
-  built once per worker and reused.
-- `_language_sample` — first 800 + middle 600 + last 600 chars (short texts
-  whole), so English-chrome can't hide a foreign body.
-- `detect_languages_batch` — code per text (`en`/`fr`/`ar`/`other`/…):
-  rejects short/scriptless/low-confidence, >10% unsupported-script veto,
-  Arabic revalidation against Persian/Urdu lookalikes.
-- JSON-LD + `extract_publication_date` / `extract_date_from_text_fallback` /
-  `extract_author` — author/date hunt: meta tags → JSON-LD → `<time>` →
-  body-text regex, `"N/A"` if absent.
-- `_trafilatura_text` — main-content extraction (no comments/tables).
-- `extract_html_fields` — decode → read metadata before deleting junk tags →
-  trafilatura if ≥ `min_words`, else selectolax body text → word floor →
-  full field dict.
+The launcher packages Python dependencies and project modules for YARN. Environment
+and Spark-jar fingerprints select reusable archives on HDFS; temporary uploads are
+renamed into place. Code is packaged each launch. Shared archives are retained until
+manual maintenance removes unused versions.
 
-## Support files
+## Code map
 
-- `utils.py` — `is_target_language` (ar/en/fr), encoding/mojibake checks,
-  Arabic-script validation.
-- `db_inspect.py` — counts, checkpoints, recent runs, article previews
-  (`DB_INSPECT_SAMPLES/PREVIEW`).
-- `rag_loader.py` — `iter_documents` (server-side streaming cursor),
-  `iter_document_chunks` (800/100 split), `load_documents_distributed`
-  (needs explicit limit).
-- `run_to_db.sh` — validates config first, zips code, fingerprints +
-  `venv-pack`s `.venv`, atomically publishes venv + Spark jars to HDFS, then
-  `spark-submit --master yarn` (512m/512m/512m overhead, 1 core × 3).
-- `export_csv.sh` — dumps the 5 article tables to `./warcdb_csv/`, prints
-  counts, copies to `/mnt/hgfs/copy_path/warcdb_csv/`.
-- `requirements.txt` (+`-dev`, `+rag`) — pinned ingest/test/RAG deps; cluster
-  PySpark is reused, never pip-installed.
+| File | Responsibility |
+|---|---|
+| [stream_to_db.py](stream_to_db.py) | Configuration, scheduling, workers, progress, and run lifecycle |
+| [db/db_handler.py](db/db_handler.py) | Schema, locking, inserts, and durable ingestion state |
+| [parsers/parsers.py](parsers/parsers.py) | Streaming WARC parsing and gzip validation |
+| [extractors/extractors.py](extractors/extractors.py) | Article text, metadata, and language detection |
+| [utils.py](utils.py) | Encoding and language validation |
+| [run_to_db.sh](run_to_db.sh) | Packaging and YARN submission |
+| [rag_loader.py](rag_loader.py) | Streaming database documents and text chunks |
+| [db_inspect.py](db_inspect.py), [export_csv.sh](export_csv.sh) | Inspection and post-run CSV export |
 
-## Tests
-
-- `tests/test_ingestion.py` — unit (quotas, resume, corruption, encodings,
-  real Lingua) + PG integration in throwaway schemas (`WARC_TEST_DSN`).
-- `tests/spark_smoke.py` — local `local[3]` end-to-end: 7 inserts, 3/file
-  cap, overlapping workers.
-- `tests/memory_probe.py` — 20 near-budget chunks, RSS growth <64 MiB.
-- `tests/package_smoke.py` — real venv pack + relocated worker imports.
-- `tests/test_launcher.py` — dry-run never packages/submits.
-- `tests/test_rag_loader.py` — streaming laziness + eager-limit guard.
-
-## Key settings (see README table)
-
-`YEAR/MONTH` manifest · `NUM_FILES` (default 15) · `START_FILE_OFFSET` ·
-`MAX_ACCEPTED_ARTICLES=0` (global target, 0 = unlimited) ·
-`MAX_ACCEPTED_PER_FILE=0` (per-file cap) · `MAX_FILES_PER_ROUND=3` ·
-`WORKER_MAX_CANDIDATES=100` · `WORKER_MAX_RESULT_BYTES=4MiB` ·
-`WORKER_MAX_INPUT_BYTES=32MiB` · `WORKER_MAX_SECONDS=120` ·
-`MAX_HTML_BYTES=4MiB` · `MAX_ARTICLE_BYTES=1MiB` · `MIN_WORD_COUNT=80` ·
-`USE_TRAFILATURA=1` · `LINGUA_MIN_CONFIDENCE=0.5` · `DB_BATCH_SIZE=25` ·
-`MAX_RETRIES=3` · `RESUME_RUN_ID` · `NO_PROGRESS` · `DRY_RUN`.
-
-Example — 3 articles from every file: `NUM_FILES=all
-MAX_ACCEPTED_ARTICLES=0 MAX_ACCEPTED_PER_FILE=3 ./run_to_db.sh`.
-Duplicates/rejects never consume quota; short files contribute what they have.
-
-## RAG notes
-
-Trafilatura strips most site chrome, but ~5–10% of stored articles still carry
-newsletter/subscribe/footer tails (measured on 2,678 rows). Storage impact is
-nil; retrieval impact is real (duplicate footers crowd top-k, CTA text can leak
-into answers). Mitigation: edge-anchored CTA strip + dropping boilerplate-heavy
-tail chunks; sentence-level filtering is the stronger follow-up.
-
-## Proven results (`VALIDATION.md`)
-
-Local suite green; YARN: 10/10 single-file (`...0001 SUCCEEDED`, 9.3s) and
-9/9 three-file 3/3/3 (`...0002 SUCCEEDED`, 10.6s) on worker1/2/3 with
-eventlog-verified parallelism; 19 distinct articles, idempotent resume.
+Extraction can leave residual site boilerplate. Downstream RAG processing may need
+to filter repetitive footer or subscription text before indexing.

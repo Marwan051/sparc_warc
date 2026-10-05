@@ -22,7 +22,7 @@ scripts/                  Ingestion, database inspection, and CSV export command
 tests/                    Unit tests and integration/smoke checks
 docs/                     Architecture and recorded validation
 exports/                  Existing CSV exports
-requirements/             base.txt, rag.txt, tagging-groq.txt, dev.txt dependency sets
+requirements/             Base and optional feature dependency sets
 ```
 
 Keep feature modules at the repository root and operational commands in
@@ -60,8 +60,11 @@ virtual environment other than `.venv`.
 
 Dependency files are grouped by use: `requirements/base.txt` for ingestion,
 `requirements/rag.txt` for ingestion plus document/chunking support,
-`requirements/tagging-groq.txt` for RAG plus Groq tagging, and
-`requirements/dev.txt` for ingestion plus test dependencies. Install the tagging
+`requirements/tagging-groq.txt` for RAG plus Groq tagging,
+`requirements/embeddings.txt` for RAG plus vector storage, local embedding models,
+and the retrieval API. Install it with
+`.venv/bin/python -m pip install -r requirements/embeddings.txt`.
+`requirements/dev.txt` provides ingestion plus test dependencies. Install the tagging
 and development files to run all optional processing unit tests.
 `chunking/requirements.txt` delegates to `requirements/rag.txt` for compatibility;
 dependency versions are maintained only under `requirements/`.

@@ -147,10 +147,16 @@ def init_db(conn=None):
                 cur.execute(ddl)
                 cur.execute("INSERT INTO ingest_schema_versions(version) VALUES (2)")
             cur.execute("SELECT 1 FROM ingest_schema_versions WHERE version=3")
-            if not cur.fetchone():
+            has_enrichment_schema = cur.fetchone() is not None
+            if not has_enrichment_schema:
                 from db.enrichment_schema import DDL
                 cur.execute(DDL)
                 cur.execute("INSERT INTO ingest_schema_versions(version) VALUES (3)")
+            cur.execute("SELECT 1 FROM ingest_schema_versions WHERE version=4")
+            if not cur.fetchone():
+                from db.vector_schema import DDL
+                cur.execute(DDL)
+                cur.execute("INSERT INTO ingest_schema_versions(version) VALUES (4)")
         conn.commit()
     except Exception:
         conn.rollback()

@@ -3,6 +3,7 @@ FastWARC==1.0.9
 charset-normalizer>=3.4,<4
 lingua-language-detector==2.2.0
 psycopg2-binary>=2.9,<3
+python-dotenv>=1,<2
 selectolax>=0.3,<0.5
 tqdm>=4.60,<5
 trafilatura>=2,<3

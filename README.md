@@ -6,6 +6,12 @@ counts only newly committed articles toward your requested quotas.
 
 [Architecture](docs/architecture.md) · [Validation results](docs/validation.md)
 
+For parallel post-ingestion processing, use the independent
+[Spark chunking and tagging jobs](docs/processing.md):
+`scripts/run_chunking.sh` and `scripts/run_tagging.sh`. Both process bounded
+batches with driver-owned PostgreSQL commits; tagging supports pluggable model
+backends.
+
 ## Project layout
 
 ```text
@@ -16,7 +22,7 @@ scripts/                  Ingestion, database inspection, and CSV export command
 tests/                    Unit tests and integration/smoke checks
 docs/                     Architecture and recorded validation
 exports/                  Existing CSV exports
-requirements/             base.txt, rag.txt, dev.txt dependency sets
+requirements/             base.txt, rag.txt, tagging-groq.txt, dev.txt dependency sets
 ```
 
 Keep feature modules at the repository root and operational commands in
@@ -37,7 +43,8 @@ The existing `db/db_handler.py` path is retained; the former `extractors`,
 ## Setup
 
 Run ingestion on the Spark master with HDFS and YARN available. The launcher uses
-three executors with one core each. PostgreSQL must be reachable from the master;
+three executors by default with one core each; set `SPARK_EXECUTOR_INSTANCES`
+to choose a different fixed count per run. PostgreSQL must be reachable from the master;
 workers need matching Python versions and the interpreter path used by the packed
 virtual environment. The launcher also requires `zip`.
 
@@ -52,9 +59,12 @@ Use the cluster's `spark-submit`; it supplies PySpark. Set `VENV_DIR` to use a
 virtual environment other than `.venv`.
 
 Dependency files are grouped by use: `requirements/base.txt` for ingestion,
-`requirements/rag.txt` for ingestion plus document/chunking support, and
-`requirements/dev.txt` for ingestion plus test dependencies. Install both the
-RAG and development files to run optional RAG tests.
+`requirements/rag.txt` for ingestion plus document/chunking support,
+`requirements/tagging-groq.txt` for RAG plus Groq tagging, and
+`requirements/dev.txt` for ingestion plus test dependencies. Install the tagging
+and development files to run all optional processing unit tests.
+`chunking/requirements.txt` delegates to `requirements/rag.txt` for compatibility;
+dependency versions are maintained only under `requirements/`.
 
 Generated worker environments, Spark JAR archives, and temporary packaging files
 stay in `.build-tmp/` (ignored by Git).
@@ -67,7 +77,12 @@ export PGHOST=localhost PGPORT=5432
 export PGDATABASE=warcdb PGUSER=warc_user PGPASSWORD=password
 ```
 
-Override these environment variables for another database. The VMware host helpers
+Override these environment variables for another database.
+All three Spark shell launchers also load defaults from the project-root `.env`;
+exported or inline environment variables override file values. Install
+`requirements/base.txt` for the dotenv loader. The `.env` file is Git-ignored.
+
+The VMware host helpers
 `cluster_up.sh` and `cluster_down.sh` start and stop
 the VMs and Hadoop services; run them on the Debian host, not inside a VM.
 
@@ -135,7 +150,8 @@ Application configuration uses environment variables. Byte limits are integer by
 
 | Variable | Default | Purpose |
 |---|---:|---|
-| `MAX_FILES_PER_ROUND` | `3` | Concurrent file tasks, capped at three |
+| `SPARK_EXECUTOR_INSTANCES` | `3` | Fixed executor count per run; positive integer |
+| `MAX_FILES_PER_ROUND` | executor count | Concurrent file tasks |
 | `WORKER_MAX_CANDIDATES` | `100` | Candidates per task |
 | `WORKER_MAX_RESULT_BYTES` | `4194304` | Candidate payload per task: 4 MiB |
 | `WORKER_MAX_INPUT_BYTES` | `33554432` | Compressed cursor advance per task: 32 MiB |

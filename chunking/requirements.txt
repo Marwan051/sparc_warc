@@ -1,0 +1,2 @@
+# Compatibility entry point; maintain dependency versions in requirements/.
+-r ../requirements/rag.txt

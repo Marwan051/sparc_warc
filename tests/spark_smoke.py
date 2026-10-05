@@ -66,7 +66,7 @@ def main():
     code_archive = Path(code_directory.name) / 'project_code.zip'
     root = Path(__file__).resolve().parents[1]
     with zipfile.ZipFile(code_archive, 'w') as archive:
-        for package in ('ingestion', 'db', 'chunking'):
+        for package in ('ingestion', 'db', 'chunking', 'tagging', 'jobs'):
             for source in (root / package).rglob('*.py'):
                 archive.write(source, source.relative_to(root))
     spark.sparkContext.addPyFile(str(code_archive))

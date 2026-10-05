@@ -113,9 +113,14 @@ manual maintenance removes unused versions.
 
 ## Module boundaries
 
+Post-ingestion processing now has two independent Spark jobs: `chunking.pipeline`
+and `tagging.pipeline`, sharing bounded concurrent task submission in `jobs`.
+The driver reads PostgreSQL and commits completed batches; executors clean/split
+or run a batch analyzer. See [processing and recovery](processing.md).
+
 The application uses top-level feature packages. Run Python module commands from
 the project root; no editable install or extra source path is needed. Spark's
-`--py-files` archive contains `ingestion/`, `db/`, and `chunking/`, preserving the
+`--py-files` archive contains `ingestion/`, `db/`, `chunking/`, `tagging/`, and `jobs/`, preserving the
 same imports on workers. The launcher resolves the project root itself and can
 be invoked from another directory.
 
@@ -124,9 +129,15 @@ be invoked from another directory.
 - **db** owns connections, schema, writes, ingestion checkpoints, and inspection.
   Its `documents.py` module streams stored articles as LangChain Documents while
   retaining source metadata and cursor cleanup.
-- **chunking** accepts Documents and yields chunks without loading the corpus or
-  accessing PostgreSQL. Add alternative splitters here and preserve provenance
-  in metadata.
+- **chunking** contains pure cleaning/splitting helpers and a separate Spark
+  coordinator. Splitters accept Documents and preserve provenance; the coordinator
+  uses `db.chunks` for source selection and transactional materialization.
+- **tagging** defines a provider-independent batch contract, optional backend
+  adapters, and a Spark coordinator using `db.analyses` for persistence.
+- **jobs** supplies bounded batch packing, concurrent Spark submission, and CLI
+  runtime helpers. All three pipelines share Spark startup and task submission;
+  ingestion retains its own task allocation and transactional wave scheduling.
+  The three shell launchers share packaging through `scripts/run_processing.sh`.
 
 Create `retrieval/` when indexing, search, or ranking code is added. Keep backend
 adapters with that feature and compose stages at their entry points. Package

@@ -14,7 +14,7 @@ class PackagingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             archive = Path(directory) / 'project_code.zip'
             subprocess.run(
-                ['zip', '-qr', str(archive), 'ingestion', 'db', 'chunking', '-x',
+                ['zip', '-qr', str(archive), 'ingestion', 'db', 'chunking', 'tagging', 'jobs', '-x',
                  '*/__pycache__/*', '*.pyc'], cwd=root, check=True,
             )
             code = '''
@@ -24,7 +24,7 @@ import sys
 
 class NoRagDependencies(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
-        if fullname.startswith('langchain'):
+        if fullname.startswith(('langchain', 'groq', 'transformers')):
             raise ImportError('Optional RAG dependency imported by ingestion')
 
 sys.meta_path.insert(0, NoRagDependencies())
@@ -34,6 +34,8 @@ from ingestion.warc import ValidatedGzipStream
 from db.db_handler import commit_chunk
 import chunking
 import db
+import tagging
+import jobs
 assert '.zip/' in pipeline.__file__, pipeline.__file__
 assert pipeline.process_file_chunk.__module__ == 'ingestion.pipeline'
 runpy.run_path(sys.argv[1], run_name='__main__')

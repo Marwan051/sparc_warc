@@ -50,5 +50,5 @@ class RagTests(unittest.TestCase):
         first = next(chunks)
         self.assertEqual(consumed, [0])
         self.assertLessEqual(len(first.page_content), 50)
-        self.assertEqual(first.metadata, {'doc_id': 0, 'source': 'https://example.com'})
+        self.assertEqual(first.metadata, {'doc_id': 0, 'source': 'https://example.com', 'chunk_index': 0})
         chunks.close()

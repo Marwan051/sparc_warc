@@ -140,12 +140,17 @@ def init_db(conn=None):
     """
     try:
         with _cursor(conn) as cur:
-            cur.execute("CREATE TABLE IF NOT EXISTS ingest_schema_versions (version INT PRIMARY KEY, applied_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP)")
             cur.execute("SELECT pg_advisory_xact_lock(782936402)")
+            cur.execute("CREATE TABLE IF NOT EXISTS ingest_schema_versions (version INT PRIMARY KEY, applied_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP)")
             cur.execute("SELECT 1 FROM ingest_schema_versions WHERE version=2")
             if not cur.fetchone():
                 cur.execute(ddl)
                 cur.execute("INSERT INTO ingest_schema_versions(version) VALUES (2)")
+            cur.execute("SELECT 1 FROM ingest_schema_versions WHERE version=3")
+            if not cur.fetchone():
+                from db.enrichment_schema import DDL
+                cur.execute(DDL)
+                cur.execute("INSERT INTO ingest_schema_versions(version) VALUES (3)")
         conn.commit()
     except Exception:
         conn.rollback()

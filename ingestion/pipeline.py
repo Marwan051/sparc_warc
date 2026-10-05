@@ -18,6 +18,8 @@ import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+from jobs.runtime import env_int as _env_int, start_spark
+from jobs.batching import execute_batch
 
 
 from db.db_handler import (
@@ -33,17 +35,6 @@ from db.db_handler import (
 from ingestion.extraction import detect_languages_batch, extract_html_fields
 from ingestion.warc import parse_warc_records_streaming, ValidatedGzipStream
 from ingestion.text import is_target_language
-
-
-def _env_int(name, default, *, minimum=0):
-    raw = os.environ.get(name, str(default)).strip()
-    try:
-        value = int(raw)
-    except ValueError as error:
-        raise ValueError(f"{name} must be an integer, got {raw!r}") from error
-    if value < minimum:
-        raise ValueError(f"{name} must be at least {minimum}, got {value}")
-    return value
 
 
 def _parse_num_files(raw):
@@ -77,7 +68,7 @@ def load_config():
         "start_file_offset": _env_int("START_FILE_OFFSET", 0),
         "target_articles": _env_int("MAX_ACCEPTED_ARTICLES", 0),
         "per_file_target": _env_int("MAX_ACCEPTED_PER_FILE", 0),
-        "max_files_per_round": _env_int("MAX_FILES_PER_ROUND", 3, minimum=1),
+        "max_files_per_round": _env_int("MAX_FILES_PER_ROUND", _env_int("SPARK_EXECUTOR_INSTANCES", 3, minimum=1), minimum=1),
         "worker_max_candidates": _env_int("WORKER_MAX_CANDIDATES", 100, minimum=1),
         "worker_max_result_bytes": _env_int("WORKER_MAX_RESULT_BYTES", 4 * 1024 * 1024, minimum=1024),
         "worker_max_input_bytes": _env_int("WORKER_MAX_INPUT_BYTES", 32 * 1024 * 1024, minimum=65536),
@@ -97,24 +88,13 @@ def load_config():
         raise ValueError("LINGUA_MIN_CONFIDENCE must be between 0 and 1")
     if os.environ.get("USE_TRAFILATURA", "1") not in ("0", "1"):
         raise ValueError("USE_TRAFILATURA must be 0 or 1")
-    if config["max_files_per_round"] > 3:
-        print("WARNING: MAX_FILES_PER_ROUND exceeds the cluster's three executors; using 3.")
-        config["max_files_per_round"] = 3
     if config["max_article_bytes"] > config["worker_max_result_bytes"]:
         raise ValueError("MAX_ARTICLE_BYTES cannot exceed WORKER_MAX_RESULT_BYTES")
     return config
 
 
 def get_spark_session():
-    from pyspark.sql import SparkSession
-    builder = (
-        SparkSession.builder.appName("CC-NEWS-Bounded-Ingest")
-        .config("spark.task.maxDirectResultSize", "16m")
-        .config("spark.python.worker.reuse", "true")
-    )
-    if os.environ.get("SPARK_MASTER_URL"):
-        builder = builder.master(os.environ["SPARK_MASTER_URL"])
-    return builder.getOrCreate()
+    return start_spark("ingest", {})
 
 
 def _sleep_backoff(attempt):
@@ -518,7 +498,7 @@ def run_streaming_pipeline():
                 spark = get_spark_session()
                 spark.sparkContext.setLogLevel("WARN")
             wave += 1
-            results = spark.sparkContext.parallelize(tasks, len(tasks)).map(process_file_chunk).collect()
+            results = execute_batch(spark, tasks, process_file_chunk)
             wave_inserted = 0
             failed = False
             for result in results:

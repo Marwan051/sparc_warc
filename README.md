@@ -61,7 +61,7 @@ virtual environment other than `.venv`.
 Dependency files are grouped by use: `requirements/base.txt` for ingestion,
 `requirements/rag.txt` for ingestion plus document/chunking support,
 `requirements/tagging-groq.txt` for RAG plus Groq tagging,
-`requirements/embeddings.txt` for RAG plus vector storage, local embedding models,
+`requirements/embeddings.txt` for RAG plus vector storage, ONNX CPU embeddings,
 and the retrieval API. Install it with
 `.venv/bin/python -m pip install -r requirements/embeddings.txt`.
 `requirements/dev.txt` provides ingestion plus test dependencies. Install the tagging

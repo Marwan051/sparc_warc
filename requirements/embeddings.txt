@@ -9,10 +9,9 @@ pydantic>=2,<3
 # PostgreSQL vector adaptation
 pgvector>=0.3,<1
 
-# Embeddings, reranking, and translation
-sentence-transformers>=3,<6
+# ONNX CPU embedding runtime
+onnxruntime>=1.20,<2
 transformers>=4.45,<6
-torch>=2.2,<3
 
 # Optional language detection used by retrieval inputs
 langdetect>=1.0.9,<2

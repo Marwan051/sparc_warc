@@ -4,6 +4,8 @@ __pycache__/
 !.env.example
 *.py[cod]
 .venv/
+.venv-embedding/
+.venv-embedding-onnx/
 create/
 lib/
 lib64
@@ -20,4 +22,5 @@ pyspark_venv-*.tar.gz
 spark-libs-*.zip
 .build-tmp/
 .local-wheels/
+.models/
 .pack-*/

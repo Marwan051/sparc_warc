@@ -12,49 +12,66 @@ if [ "${1:-}" != --env-loaded ]; then
         bash "$PROJECT_ROOT/scripts/run_processing.sh" --env-loaded "$@"
 fi
 shift
-STAGE="${1:?expected ingest, chunk, or tag}"
+STAGE="${1:?expected ingest, chunk, tag, or embed}"
 shift
-case "$STAGE" in ingest|chunk|tag) ;; *) exit 2 ;; esac
+case "$STAGE" in ingest|chunk|tag|embed) ;; *) exit 2 ;; esac
 VENV_DIR="${VENV_DIR:-$PROJECT_ROOT/.venv}"
+if [ "$STAGE" = embed ]; then
+    VENV_DIR="${EMBEDDING_VENV_DIR:-${EMBEDDING_ONNX_VENV_DIR:-$PROJECT_ROOT/.venv-embedding-onnx}}"
+fi
 if [ ! -x "$VENV_DIR/bin/python" ]; then
     echo "Missing virtual environment: $VENV_DIR. See README.md setup instructions." >&2
     exit 1
 fi
 VENV_DIR="$(cd "$VENV_DIR" && pwd)"
 export RAYON_NUM_THREADS=1 OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
-# Validate before packaging, network access, database access, or Spark startup.
-SPARK_EXECUTOR_INSTANCES="$("$VENV_DIR/bin/python" -c 'from jobs.runtime import env_int; print(env_int("SPARK_EXECUTOR_INSTANCES", 3, minimum=1))')"
-export SPARK_EXECUTOR_INSTANCES
 MODULE=chunking.pipeline
+if [ "$STAGE" = ingest ]; then MODULE=ingestion.pipeline; fi
 if [ "$STAGE" = tag ]; then MODULE=tagging.pipeline; fi
-if [ "$STAGE" = ingest ]; then
-    "$VENV_DIR/bin/python" -c 'from ingestion.pipeline import load_config; load_config()'
-    if [ "${DRY_RUN:-0}" = 1 ]; then
-        exec "$VENV_DIR/bin/python" -m ingestion.pipeline
+if [ "$STAGE" = embed ]; then MODULE=embeddings.pipeline; fi
+for argument in "$@"; do
+    if [ "$argument" = --help ] || [ "$argument" = -h ]; then
+        exec "$VENV_DIR/bin/python" -m "$MODULE" "$@"
     fi
-else
-    "$VENV_DIR/bin/python" -m "$MODULE" --dry-run "$@" >/dev/null
-    for argument in "$@"; do
-        if [ "$argument" = --dry-run ] || [ "$argument" = --help ] || [ "$argument" = -h ]; then
-            exec "$VENV_DIR/bin/python" -m "$MODULE" "$@"
-        fi
-    done
-    if [ "${DRY_RUN:-0}" = 1 ]; then
-        exec "$VENV_DIR/bin/python" -m "$MODULE" --dry-run "$@"
-    fi
+done
+# Resolve CLI and environment settings before packaging or contacting the cluster.
+RESOLVED="$("$VENV_DIR/bin/python" -m jobs.launch_config "$STAGE" "$@")"
+IFS=$'\t' read -r SPARK_EXECUTOR_INSTANCES RESOLVED_DRY_RUN DRIVER_MEMORY EXECUTOR_MEMORY EXECUTOR_MEMORY_OVERHEAD <<< "$RESOLVED"
+export SPARK_EXECUTOR_INSTANCES
+if [ "$RESOLVED_DRY_RUN" = 1 ]; then
+    exec "$VENV_DIR/bin/python" -m "$MODULE" "$@"
 fi
 BUILD_DIR="$PROJECT_ROOT/.build-tmp"
 mkdir -p "$BUILD_DIR"
 TASK_TMP="$(mktemp -d "$BUILD_DIR/pack-XXXXXX")"
 trap 'rm -rf "$TASK_TMP"' EXIT
 ZIP="$TASK_TMP/project_code.zip"
-zip -qr "$ZIP" ingestion db chunking tagging jobs -x '*/__pycache__/*' '*.pyc'
+zip -qr "$ZIP" ingestion db chunking tagging embeddings jobs -x '*/__pycache__/*' '*.pyc'
+
+if [ "$STAGE" = embed ]; then
+    EMBEDDING_SOURCE="${EMBEDDING_MODEL_DIR:-$PROJECT_ROOT/.models/bge-m3-int8}"
+    if [ ! -s "$EMBEDDING_SOURCE/onnx/model_int8.onnx" ] || [ ! -s "$EMBEDDING_SOURCE/tokenizer.json" ]; then
+        echo "Missing INT8 embedding model or tokenizer in $EMBEDDING_SOURCE. Prepare it with scripts/setup_embedding_onnx_env.sh and scripts/download_quantized_embedding_model.sh." >&2
+        exit 1
+    fi
+    EMBEDDING_SOURCE="$(cd "$EMBEDDING_SOURCE" && pwd)"
+    export EMBEDDING_MODEL_DIR="$EMBEDDING_SOURCE"
+    MODEL_FINGERPRINT="$(find "$EMBEDDING_SOURCE" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d ' ' -f 1)"
+    MODEL_ARCHIVE="$BUILD_DIR/embedding_model-$MODEL_FINGERPRINT.tar.gz"
+    if [ ! -f "$MODEL_ARCHIVE" ]; then
+        tar -C "$EMBEDDING_SOURCE" -czf "$TASK_TMP/embedding-model.tar.gz" .
+        mv "$TASK_TMP/embedding-model.tar.gz" "$MODEL_ARCHIVE"
+    fi
+    "$VENV_DIR/bin/python" -c 'import numpy, onnxruntime, transformers, pgvector.psycopg2'
+fi
 
 # Hash installed distributions as well as declared dependencies and Python.
 VENV_FINGERPRINT="$(
     {
         if [ "$STAGE" = ingest ]; then
             cat requirements/base.txt "$VENV_DIR/pyvenv.cfg"
+        elif [ "$STAGE" = embed ]; then
+            cat requirements/embedding-worker-onnx.txt "$VENV_DIR/pyvenv.cfg"
         else
             cat requirements/base.txt requirements/rag.txt requirements/tagging-groq.txt "$VENV_DIR/pyvenv.cfg"
         fi
@@ -88,6 +105,14 @@ if [ "${USE_HDFS_CACHE:-1}" = 1 ] && hdfs dfs -test -e / >/dev/null 2>&1; then
     if publish_hdfs "$VENV_ARCHIVE" "$HDFS_VENV"; then
         ARCHIVES_SPEC="hdfs://$HDFS_VENV#environment"
     fi
+    if [ "$STAGE" = embed ]; then
+        HDFS_MODEL="$HDFS_APPS_DIR/embedding_model-$MODEL_FINGERPRINT.tar.gz"
+        if publish_hdfs "$MODEL_ARCHIVE" "$HDFS_MODEL"; then
+            MODEL_ARCHIVE_SPEC="hdfs://$HDFS_MODEL#embedding-model"
+        else
+            MODEL_ARCHIVE_SPEC="$MODEL_ARCHIVE#embedding-model"
+        fi
+    fi
     : "${SPARK_HOME:?Set SPARK_HOME to the cluster Spark installation}"
     JARS_HASH="$(find "$SPARK_HOME/jars" -maxdepth 1 -name '*.jar' -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d ' ' -f 1)"
     JARS_ARCHIVE="$BUILD_DIR/spark-libs-$JARS_HASH.zip"
@@ -100,6 +125,10 @@ if [ "${USE_HDFS_CACHE:-1}" = 1 ] && hdfs dfs -test -e / >/dev/null 2>&1; then
         EXTRA_CONF+=(--conf "spark.yarn.archive=hdfs://$HDFS_JARS")
     fi
 fi
+if [ "$STAGE" = embed ]; then
+    MODEL_ARCHIVE_SPEC="${MODEL_ARCHIVE_SPEC:-$MODEL_ARCHIVE#embedding-model}"
+    ARCHIVES_SPEC="$ARCHIVES_SPEC,$MODEL_ARCHIVE_SPEC"
+fi
 export PYSPARK_DRIVER_PYTHON="$VENV_DIR/bin/python"
 export PYSPARK_PYTHON="./environment/bin/python"
 if [ "$STAGE" = ingest ]; then
@@ -110,9 +139,9 @@ else
 fi
 "$SPARK_SUBMIT" \
     --master yarn --deploy-mode client \
-    --driver-memory "${SPARK_DRIVER_MEMORY:-512m}" \
-    --executor-memory "${SPARK_EXECUTOR_MEMORY:-512m}" \
-    --conf "spark.executor.memoryOverhead=${SPARK_EXECUTOR_MEMORY_OVERHEAD:-512m}" \
+    --driver-memory "$DRIVER_MEMORY" \
+    --executor-memory "$EXECUTOR_MEMORY" \
+    --conf "spark.executor.memoryOverhead=$EXECUTOR_MEMORY_OVERHEAD" \
     --conf spark.executor.cores=1 \
     --conf "spark.executor.instances=$SPARK_EXECUTOR_INSTANCES" \
     --conf spark.dynamicAllocation.enabled=false \

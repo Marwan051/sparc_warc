@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import json
 from pathlib import Path
 
 import numpy as np
@@ -15,6 +17,22 @@ _tokenizer = None
 _session = None
 _input_names: set[str] = set()
 _output_name: str | None = None
+
+
+def model_version(max_length: int) -> str:
+    """Fingerprint model/tokenizer files and vector-affecting preprocessing."""
+    model_dir = _model_directory()
+    digest = hashlib.sha256(f"cls-l2-raw-text-v1|max_length={max_length}|".encode())
+    required = (model_dir / "onnx" / "model_int8.onnx", model_dir / "tokenizer.json",
+                model_dir / "tokenizer_config.json", model_dir / "1_Pooling" / "config.json")
+    for path in required:
+        if not path.is_file():
+            raise FileNotFoundError(f"embedding model asset missing: {path}")
+        digest.update(path.name.encode())
+        with path.open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+    return f"bge-m3-int8-{digest.hexdigest()[:20]}"
 
 
 def _model_directory() -> Path:
@@ -41,6 +59,11 @@ def _load_model() -> None:
             f"INT8 ONNX model not found at {model_path}. Set EMBEDDING_MODEL_DIR "
             "to the model directory (the directory containing tokenizer.json)."
         )
+    pooling_path = model_dir / "1_Pooling" / "config.json"
+    with pooling_path.open(encoding="utf-8") as stream:
+        pooling = json.load(stream)
+    if not pooling.get("pooling_mode_cls_token") or pooling.get("pooling_mode_mean_tokens"):
+        raise RuntimeError("BGE-M3 ONNX embedding requires CLS-token pooling")
 
     threads = int(os.environ.get("EMBEDDING_INTRA_OP_THREADS", "1"))
     if threads < 1:
@@ -61,7 +84,12 @@ def _load_model() -> None:
     outputs = _session.get_outputs()
     if not outputs:
         raise RuntimeError(f"ONNX model has no outputs: {model_path}")
-    _output_name = outputs[0].name
+    output = next((item for item in outputs if item.name == "last_hidden_state"), None)
+    if output is None or len(output.shape) != 3 or output.shape[-1] != EMBEDDING_DIMENSION:
+        raise RuntimeError(f"ONNX model must expose last_hidden_state with dimension {EMBEDDING_DIMENSION}")
+    if not {"input_ids", "attention_mask"}.issubset(_input_names):
+        raise RuntimeError("ONNX model must accept input_ids and attention_mask")
+    _output_name = output.name
 
 
 def generate_embeddings(texts: list[str]) -> np.ndarray:

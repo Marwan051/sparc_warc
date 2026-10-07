@@ -120,7 +120,22 @@ class UnitTests(unittest.TestCase):
             restored = job.restore_run_config(config(), run)
         self.assertEqual((restored['year'], restored['month'], restored['min_word_count']), ('2025', '03', 123))
         with patch.dict(os.environ, {'MAX_ACCEPTED_ARTICLES': '9'}, clear=True), self.assertRaises(ValueError):
-            job.restore_run_config(config(target_articles=9), run)
+            job.restore_run_config(job.load_config(), run)
+
+    def test_dotenv_defaults_do_not_conflict_with_resume_but_explicit_values_do(self):
+        run = dict(manifest_id='2025/03', target_articles=7, per_file_target=3,
+                   config=dict(min_word_count=123, use_trafilatura=False))
+        environment = {'SPARK_WARC_EXPORTED_ENV_KEYS': '[]', 'YEAR': '2026', 'MONTH': '05',
+                       'MIN_WORD_COUNT': '80', 'USE_TRAFILATURA': '1'}
+        with patch.dict(os.environ, environment, clear=True):
+            restored = job.restore_run_config(job.load_config(['--resume-run-id', 'old']), run)
+            self.assertEqual((restored['year'], restored['month'], restored['min_word_count']),
+                             ('2025', '03', 123))
+            with self.assertRaisesRegex(ValueError, 'MIN_WORD_COUNT conflicts'):
+                job.restore_run_config(job.load_config(['--min-word-count', '80']), run)
+        environment['SPARK_WARC_EXPORTED_ENV_KEYS'] = '["YEAR"]'
+        with patch.dict(os.environ, environment, clear=True), self.assertRaisesRegex(ValueError, 'YEAR conflicts'):
+            job.restore_run_config(job.load_config(['--resume-run-id', 'old']), run)
 
     def test_french_encoding_and_jsonld(self):
         prose = 'Les élèves français étudient les événements récents et découvrent une société développée. ' * 20

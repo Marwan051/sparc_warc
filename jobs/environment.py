@@ -1,6 +1,7 @@
 """Load project dotenv defaults, then replace this process with the launcher."""
 
 import os
+import json
 from pathlib import Path
 import sys
 
@@ -12,6 +13,9 @@ def load_environment(path):
 
 
 def main():
+    # Preserve source information for resume checks: dotenv values are defaults,
+    # while variables present before loading the file are explicit overrides.
+    os.environ["SPARK_WARC_EXPORTED_ENV_KEYS"] = json.dumps(sorted(os.environ))
     load_environment(Path(__file__).resolve().parents[1] / '.env')
     command = sys.argv[1:]
     if not command:

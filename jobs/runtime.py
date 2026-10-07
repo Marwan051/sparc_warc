@@ -27,31 +27,62 @@ def positive(value):
 def config(stage, argv=None):
     from chunking import CHUNKING_VERSION
     parser = argparse.ArgumentParser(description=f"Spark {stage} job")
-    parser.add_argument("--dry-run", action="store_true", default=os.environ.get("DRY_RUN") == "1")
+    parser.add_argument("--dry-run", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--executor-instances", type=positive)
     parser.add_argument("--chunking-version", default=CHUNKING_VERSION)
-    parser.add_argument("--parallel-tasks", type=positive, default=os.environ.get(f"{stage.upper()}_MAX_PARALLEL_TASKS", str(env_int("SPARK_EXECUTOR_INSTANCES", 3, minimum=1))))
-    parser.add_argument("--items-per-task", type=positive, default=os.environ.get(f"{stage.upper()}_ITEMS_PER_TASK", "25" if stage == "chunk" else "10"))
-    parser.add_argument("--input-bytes", type=positive, default=os.environ.get(f"{stage.upper()}_TASK_INPUT_BYTES", str(2*1024*1024)))
-    parser.add_argument("--result-bytes", type=positive, default=os.environ.get(f"{stage.upper()}_TASK_RESULT_BYTES", str((4 if stage == 'chunk' else 1)*1024*1024)))
+    parser.add_argument("--parallel-tasks", type=positive)
+    parser.add_argument("--items-per-task", type=positive)
+    parser.add_argument("--input-bytes", type=positive)
+    parser.add_argument("--result-bytes", type=positive)
     if stage == "chunk":
         parser.add_argument("--document-limit", type=positive)
     else:
-        parser.add_argument("--analysis-limit", type=positive)
-        parser.add_argument("--retry-errors", action="store_true")
-        parser.add_argument("--backend", default=os.environ.get("TAGGING_BACKEND", "groq"))
-        parser.add_argument("--model", default=os.environ.get("TAGGING_MODEL", "qwen/qwen3.8-27b"))
-        parser.add_argument("--analysis-version", default=os.environ.get("TAGGING_ANALYSIS_VERSION", "chunk-analysis-v2.4.1"))
-        parser.add_argument("--export-json")
+        if stage == "tag":
+            parser.add_argument("--analysis-limit", type=positive)
+            parser.add_argument("--retry-errors", action="store_true")
+            parser.add_argument("--backend")
+            parser.add_argument("--model")
+            parser.add_argument("--analysis-version")
+            parser.add_argument("--export-json")
+        else:
+            parser.add_argument("--embedding-limit", type=positive)
+            parser.add_argument("--model")
+            parser.add_argument("--max-length", type=positive)
+            parser.add_argument("--embedding-batch-size", type=positive)
     result = vars(parser.parse_args(argv))
-    if stage == "tag" and result["backend"] != "groq":
-        if "--model" not in (argv if argv is not None else sys.argv[1:]) and not os.environ.get("TAGGING_MODEL"):
+    if result["dry_run"] is None:
+        dry_run = os.environ.get("DRY_RUN", "0")
+        if dry_run not in ("0", "1"):
+            raise ValueError("DRY_RUN must be 0 or 1")
+        result["dry_run"] = dry_run == "1"
+    if result["executor_instances"] is None:
+        result["executor_instances"] = env_int("SPARK_EXECUTOR_INSTANCES", 2 if stage == "embed" else 3, minimum=1)
+    for field, environment, default in (
+        ("parallel_tasks", f"{stage.upper()}_MAX_PARALLEL_TASKS", result["executor_instances"]),
+        ("items_per_task", f"{stage.upper()}_ITEMS_PER_TASK", 25 if stage == "chunk" else 10),
+        ("input_bytes", f"{stage.upper()}_TASK_INPUT_BYTES", 2 * 1024 * 1024),
+        ("result_bytes", f"{stage.upper()}_TASK_RESULT_BYTES", (4 if stage == "chunk" else 1) * 1024 * 1024),
+    ):
+        if result[field] is None:
+            result[field] = env_int(environment, default, minimum=1)
+    if stage == "tag":
+        result["backend"] = result["backend"] or os.environ.get("TAGGING_BACKEND", "groq")
+        if result["backend"] != "groq" and result["model"] is None and not os.environ.get("TAGGING_MODEL"):
             parser.error("a custom backend requires --model or TAGGING_MODEL")
+        result["model"] = result["model"] or os.environ.get("TAGGING_MODEL", "qwen/qwen3.8-27b")
+        result["analysis_version"] = result["analysis_version"] or os.environ.get("TAGGING_ANALYSIS_VERSION", "chunk-analysis-v2.4.1")
+    if stage == "embed":
+        result["model"] = result["model"] or os.environ.get("EMBEDDING_MODEL", "BAAI/bge-m3-int8")
+        if result["max_length"] is None:
+            result["max_length"] = env_int("EMBEDDING_MAX_LENGTH", 256, minimum=1)
+        if result["embedding_batch_size"] is None:
+            result["embedding_batch_size"] = env_int("EMBEDDING_BATCH_SIZE", 1, minimum=1)
     return result
 
 
 def start_spark(stage, cfg):
     from pyspark.sql import SparkSession
-    if stage not in ("ingest", "chunk", "tag"):
+    if stage not in ("ingest", "chunk", "tag", "embed"):
         raise ValueError(f"unknown Spark stage: {stage}")
     builder = (SparkSession.builder.appName("CC-NEWS-Bounded-Ingest" if stage == "ingest" else f"News-{stage}")
                .config("spark.python.worker.reuse", "true")
@@ -78,6 +109,11 @@ def start_spark(stage, cfg):
             if name in os.environ:
                 value = positive(os.environ[name])
                 builder = builder.config(f"spark.executorEnv.{name}", str(value))
+    if stage == "embed":
+        builder = builder.config("spark.executorEnv.EMBEDDING_MODEL_DIR", "./embedding-model")
+        builder = builder.config("spark.executorEnv.EMBEDDING_MAX_LENGTH", str(cfg["max_length"]))
+        builder = builder.config("spark.executorEnv.EMBEDDING_BATCH_SIZE", str(cfg["embedding_batch_size"]))
+        builder = builder.config("spark.executorEnv.EMBEDDING_INTRA_OP_THREADS", "1")
     return builder.getOrCreate()
 
 

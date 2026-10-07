@@ -5,6 +5,7 @@ transaction coordinator and counts only rows PostgreSQL actually inserts.
 """
 
 import gzip
+import argparse
 import hashlib
 import json
 import math
@@ -18,7 +19,7 @@ import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
-from jobs.runtime import env_int as _env_int, start_spark
+from jobs.runtime import start_spark
 from jobs.batching import execute_batch
 
 
@@ -50,44 +51,105 @@ def _parse_num_files(raw):
     return value
 
 
-def load_config():
+def load_config(argv=None):
     if "MAX_EXTRACTED_PER_ROUND" in os.environ:
         raise ValueError(
             "MAX_EXTRACTED_PER_ROUND was removed; use WORKER_MAX_CANDIDATES, "
             "WORKER_MAX_RESULT_BYTES, and WORKER_MAX_INPUT_BYTES"
         )
-    year = os.environ.get("YEAR", "2026").strip()
-    month = os.environ.get("MONTH", "05").strip().zfill(2)
+    parser = argparse.ArgumentParser(description="Spark ingestion job")
+    parser.add_argument("--year")
+    parser.add_argument("--month")
+    parser.add_argument("--num-files")
+    parser.add_argument("--resume-run-id")
+    parser.add_argument("--executor-instances", type=int)
+    numbers = {
+        "START_FILE_OFFSET": (0, 0), "MAX_ACCEPTED_ARTICLES": (0, 0),
+        "MAX_ACCEPTED_PER_FILE": (0, 0), "MAX_FILES_PER_ROUND": (None, 1),
+        "WORKER_MAX_CANDIDATES": (100, 1), "WORKER_MAX_RESULT_BYTES": (4 * 1024 * 1024, 1024),
+        "WORKER_MAX_INPUT_BYTES": (32 * 1024 * 1024, 65536), "WORKER_MAX_SECONDS": (120, 1),
+        "MAX_HTML_BYTES": (4 * 1024 * 1024, 1024), "MAX_ARTICLE_BYTES": (1024 * 1024, 1024),
+        "MIN_WORD_COUNT": (80, 1), "MAX_RETRIES": (3, 1), "DB_BATCH_SIZE": (25, 1),
+    }
+    for name in numbers:
+        parser.add_argument("--" + name.lower().replace("_", "-"), type=int)
+    parser.add_argument("--lingua-min-confidence", type=float)
+    parser.add_argument("--use-trafilatura", dest="use_trafilatura", action="store_true", default=None)
+    parser.add_argument("--no-use-trafilatura", dest="use_trafilatura", action="store_false", default=None)
+    parser.add_argument("--no-progress", dest="no_progress", action="store_true", default=None)
+    parser.add_argument("--progress", dest="no_progress", action="store_false", default=None)
+    parser.add_argument("--dry-run", action=argparse.BooleanOptionalAction, default=None)
+    options = parser.parse_args([] if argv is None else argv)
+
+    def chosen(name, default):
+        value = getattr(options, name.lower())
+        return value if value is not None else os.environ.get(name, default)
+
+    def number(name, default, minimum):
+        raw = chosen(name, default)
+        try:
+            value = int(raw)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"{name} must be an integer, got {raw!r}") from error
+        if value < minimum:
+            raise ValueError(f"{name} must be at least {minimum}, got {value}")
+        return value
+
+    def boolean(name, default):
+        raw = chosen(name, default)
+        if isinstance(raw, bool):
+            return raw
+        if str(raw) not in ("0", "1"):
+            raise ValueError(f"{name} must be 0 or 1")
+        return str(raw) == "1"
+
+    year = str(chosen("YEAR", "2026")).strip()
+    month = str(chosen("MONTH", "05")).strip().zfill(2)
     if not (year.isdigit() and len(year) == 4 and month.isdigit() and 1 <= int(month) <= 12):
         raise ValueError("YEAR/MONTH must identify a valid YYYY/MM manifest")
+    if options.executor_instances is None:
+        raw_executors = os.environ.get("SPARK_EXECUTOR_INSTANCES", "3")
+        try:
+            executors = int(raw_executors)
+        except ValueError as error:
+            raise ValueError(f"SPARK_EXECUTOR_INSTANCES must be an integer, got {raw_executors!r}") from error
+    else:
+        executors = options.executor_instances
+    if executors < 1:
+        raise ValueError("SPARK_EXECUTOR_INSTANCES must be at least 1")
     config = {
         "year": year,
         "month": month,
         "manifest_id": f"{year}/{month}",
-        "num_files": _parse_num_files(os.environ.get("NUM_FILES")),
-        "start_file_offset": _env_int("START_FILE_OFFSET", 0),
-        "target_articles": _env_int("MAX_ACCEPTED_ARTICLES", 0),
-        "per_file_target": _env_int("MAX_ACCEPTED_PER_FILE", 0),
-        "max_files_per_round": _env_int("MAX_FILES_PER_ROUND", _env_int("SPARK_EXECUTOR_INSTANCES", 3, minimum=1), minimum=1),
-        "worker_max_candidates": _env_int("WORKER_MAX_CANDIDATES", 100, minimum=1),
-        "worker_max_result_bytes": _env_int("WORKER_MAX_RESULT_BYTES", 4 * 1024 * 1024, minimum=1024),
-        "worker_max_input_bytes": _env_int("WORKER_MAX_INPUT_BYTES", 32 * 1024 * 1024, minimum=65536),
-        "worker_max_seconds": _env_int("WORKER_MAX_SECONDS", 120, minimum=1),
-        "max_html_bytes": _env_int("MAX_HTML_BYTES", 4 * 1024 * 1024, minimum=1024),
-        "max_article_bytes": _env_int("MAX_ARTICLE_BYTES", 1024 * 1024, minimum=1024),
-        "use_trafilatura": os.environ.get("USE_TRAFILATURA", "1") == "1",
-        "lingua_min_confidence": float(os.environ.get("LINGUA_MIN_CONFIDENCE", "0.5")),
-        "min_word_count": _env_int("MIN_WORD_COUNT", 80, minimum=1),
-        "max_retries": _env_int("MAX_RETRIES", 3, minimum=1),
-        "db_batch_size": _env_int("DB_BATCH_SIZE", 25, minimum=1),
-        "resume_run_id": os.environ.get("RESUME_RUN_ID", "").strip(),
-        "no_progress": os.environ.get("NO_PROGRESS", "0") == "1",
-        "dry_run": os.environ.get("DRY_RUN", "0") == "1",
+        "executor_instances": executors,
+        "num_files": _parse_num_files(chosen("NUM_FILES", "15")),
+        "start_file_offset": number("START_FILE_OFFSET", 0, 0),
+        "target_articles": number("MAX_ACCEPTED_ARTICLES", 0, 0),
+        "per_file_target": number("MAX_ACCEPTED_PER_FILE", 0, 0),
+        "max_files_per_round": number("MAX_FILES_PER_ROUND", executors, 1),
+        "worker_max_candidates": number("WORKER_MAX_CANDIDATES", 100, 1),
+        "worker_max_result_bytes": number("WORKER_MAX_RESULT_BYTES", 4 * 1024 * 1024, 1024),
+        "worker_max_input_bytes": number("WORKER_MAX_INPUT_BYTES", 32 * 1024 * 1024, 65536),
+        "worker_max_seconds": number("WORKER_MAX_SECONDS", 120, 1),
+        "max_html_bytes": number("MAX_HTML_BYTES", 4 * 1024 * 1024, 1024),
+        "max_article_bytes": number("MAX_ARTICLE_BYTES", 1024 * 1024, 1024),
+        "use_trafilatura": boolean("USE_TRAFILATURA", "1"),
+        "lingua_min_confidence": float(chosen("LINGUA_MIN_CONFIDENCE", "0.5")),
+        "min_word_count": number("MIN_WORD_COUNT", 80, 1),
+        "max_retries": number("MAX_RETRIES", 3, 1),
+        "db_batch_size": number("DB_BATCH_SIZE", 25, 1),
+        "resume_run_id": str(chosen("RESUME_RUN_ID", "")).strip(),
+        "no_progress": boolean("NO_PROGRESS", "0"),
+        "dry_run": boolean("DRY_RUN", "0"),
     }
+    exported = os.environ.get("SPARK_WARC_EXPORTED_ENV_KEYS")
+    explicit_environment = set(json.loads(exported)) if exported is not None else set(os.environ)
+    config["_explicit_env_keys"] = sorted(
+        (explicit_environment & set(SEMANTIC_ENV.values())) |
+        {name for name in SEMANTIC_ENV.values() if getattr(options, name.lower()) is not None}
+    )
     if not 0 <= config["lingua_min_confidence"] <= 1:
         raise ValueError("LINGUA_MIN_CONFIDENCE must be between 0 and 1")
-    if os.environ.get("USE_TRAFILATURA", "1") not in ("0", "1"):
-        raise ValueError("USE_TRAFILATURA must be 0 or 1")
     if config["max_article_bytes"] > config["worker_max_result_bytes"]:
         raise ValueError("MAX_ARTICLE_BYTES cannot exceed WORKER_MAX_RESULT_BYTES")
     return config
@@ -368,7 +430,7 @@ def _allocate_tasks(config, run, files, wave):
 
 
 def _print_config(config):
-    printable = {k: v for k, v in config.items() if k not in ("resume_run_id", "no_progress", "dry_run")}
+    printable = {k: v for k, v in config.items() if k not in ("resume_run_id", "no_progress", "dry_run", "_explicit_env_keys")}
     print(json.dumps(printable, indent=2, sort_keys=True))
 
 
@@ -414,7 +476,7 @@ def restore_run_config(config, run):
     for key, env in SEMANTIC_ENV.items():
         if key not in stored:
             continue
-        if env in os.environ and config[key] != stored[key]:
+        if env in config.get("_explicit_env_keys", os.environ) and config[key] != stored[key]:
             raise ValueError(f"{env} conflicts with persisted settings for RESUME_RUN_ID")
         config[key] = stored[key]
     config["manifest_id"] = run["manifest_id"]
@@ -447,8 +509,8 @@ def _summary(run_id, config, conn):
     print(f"Resume command: RESUME_RUN_ID={run_id} ./scripts/run_ingestion.sh")
 
 
-def run_streaming_pipeline():
-    config = load_config()
+def run_streaming_pipeline(argv=None):
+    config = load_config(argv)
     if config["dry_run"]:
         _print_config(config)
         return 0
@@ -557,7 +619,7 @@ def run_streaming_pipeline():
 def main():
     """Run the ingestion command and report fatal errors consistently."""
     try:
-        sys.exit(run_streaming_pipeline())
+        sys.exit(run_streaming_pipeline(sys.argv[1:]))
     except Exception as error:
         stamp = datetime.now(timezone.utc).isoformat()
         print(f"[{stamp}] FATAL {type(error).__name__}: {error}", file=sys.stderr)

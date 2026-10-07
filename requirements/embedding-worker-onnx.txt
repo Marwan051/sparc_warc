@@ -2,5 +2,7 @@
 numpy>=1.26,<3
 onnxruntime>=1.20,<2
 transformers>=4.45,<6
+psycopg2-binary>=2.9,<3
+pgvector>=0.3,<1
 python-dotenv>=1,<2
 venv-pack==0.2.0

@@ -2,7 +2,7 @@
 set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_ROOT"
-EMBED_ENV="${EMBEDDING_ONNX_VENV_DIR:-$PROJECT_ROOT/.venv-embedding-onnx}"
+EMBED_ENV="${EMBEDDING_VENV_DIR:-${EMBEDDING_ONNX_VENV_DIR:-$PROJECT_ROOT/.venv-embedding-onnx}}"
 SETUP_PYTHON="${EMBEDDING_SETUP_PYTHON:-python3}"
 if [ ! -d "$EMBED_ENV" ]; then
     "$SETUP_PYTHON" -m venv "$EMBED_ENV"
@@ -18,7 +18,7 @@ export PIP_CONFIG_FILE=/dev/null
 unset PIP_INDEX_URL PIP_EXTRA_INDEX_URL PIP_FIND_LINKS PIP_NO_INDEX PIP_TARGET PIP_PREFIX PIP_USER
 "$EMBED_ENV/bin/python" -m pip install --retries 3 --timeout 30 \
     --index-url https://pypi.org/simple -r requirements/embedding-worker-onnx.txt
-"$EMBED_ENV/bin/python" -m pip check
+env -u PYTHONPATH "$EMBED_ENV/bin/python" -m pip check
 "$EMBED_ENV/bin/python" -c '
 import importlib.util, onnxruntime, transformers
 if importlib.util.find_spec("torch") or importlib.util.find_spec("sentence_transformers"):

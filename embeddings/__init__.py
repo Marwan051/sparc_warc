@@ -1,1 +1,5 @@
-"""Embed the chunks with their summaries into the database"""
+"""Chunk embedding generation and orchestration."""
+
+from embeddings.embeddings import generate_embeddings
+
+__all__ = ["generate_embeddings"]

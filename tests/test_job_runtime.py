@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 
 from jobs.batching import execute_batch
 from jobs.runtime import start_spark, config
+from jobs.launch_config import resolve
 from ingestion.pipeline import load_config
 
 
@@ -17,8 +18,9 @@ class RuntimeTests(unittest.TestCase):
             with self.subTest(count=count), patch.dict('os.environ', env, clear=True):
                 expected = int(count or 3)
                 self.assertEqual(load_config()['max_files_per_round'], expected)
-                for stage in ('chunk', 'tag'):
-                    self.assertEqual(config(stage, [])['parallel_tasks'], expected)
+                for stage in ('chunk', 'tag', 'embed'):
+                    stage_expected = 2 if count is None and stage == 'embed' else expected
+                    self.assertEqual(config(stage, [])['parallel_tasks'], stage_expected)
                     self.assertEqual(config(stage, ['--parallel-tasks', '7'])['parallel_tasks'], 7)
                 with patch.dict('os.environ', {'MAX_FILES_PER_ROUND': '6', 'CHUNK_MAX_PARALLEL_TASKS': '4'}):
                     self.assertEqual(load_config()['max_files_per_round'], 6)
@@ -29,6 +31,31 @@ class RuntimeTests(unittest.TestCase):
                     load_config()
                 with self.assertRaises(ValueError):
                     config('chunk', [])
+
+    def test_cli_beats_invalid_environment_and_controls_launcher(self):
+        env = {'SPARK_EXECUTOR_INSTANCES': 'bad', 'DRY_RUN': 'bad',
+               'CHUNK_ITEMS_PER_TASK': 'bad', 'EMBEDDING_MAX_LENGTH': 'bad'}
+        with patch.dict('os.environ', env, clear=True):
+            ingest = load_config(['--executor-instances', '3', '--max-accepted-articles', '50',
+                                  '--num-files', 'all', '--dry-run'])
+            self.assertEqual((ingest['executor_instances'], ingest['target_articles'],
+                              ingest['num_files'], ingest['max_files_per_round']), (3, 50, None, 3))
+            chunk = config('chunk', ['--executor-instances', '3', '--items-per-task', '5', '--dry-run'])
+            self.assertEqual((chunk['executor_instances'], chunk['parallel_tasks'],
+                              chunk['items_per_task']), (3, 3, 5))
+            embed = config('embed', ['--executor-instances', '3', '--max-length', '128', '--dry-run'])
+            self.assertEqual((embed['parallel_tasks'], embed['max_length']), (3, 128))
+            self.assertEqual(resolve('ingest', ['--executor-instances', '3', '--dry-run'])[:2], (3, True))
+
+    def test_embedding_memory_fallback_and_stage_override(self):
+        with patch.dict('os.environ', {}, clear=True):
+            count, _, _, executor, overhead = resolve('embed', [])
+            self.assertEqual((count, executor, overhead), (2, '512m', '1g'))
+        with patch.dict('os.environ', {'SPARK_EXECUTOR_MEMORY': '3g',
+                                       'SPARK_EXECUTOR_MEMORY_OVERHEAD': '768m'}, clear=True):
+            self.assertEqual(resolve('embed', [])[3:], ('3g', '768m'))
+            with patch.dict('os.environ', {'EMBEDDING_EXECUTOR_MEMORY': '4g'}):
+                self.assertEqual(resolve('embed', [])[3:], ('4g', '768m'))
 
     def test_stage_specific_spark_settings(self):
         for stage in ('ingest', 'chunk', 'tag'):

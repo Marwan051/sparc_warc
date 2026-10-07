@@ -67,6 +67,15 @@ print(json.dumps({'args':args,'files':names}))
                         self.assertEqual(archive_path.read_bytes(), b'test archive')
                         archive_path.unlink()
                         archive_path = None
+                result = subprocess.run(['bash', str(root/'scripts/run_chunking.sh'),
+                                         '--executor-instances', '2', '--parallel-tasks', '4'],
+                    cwd=directory, env=env, text=True, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                recorded = json.loads(result.stdout.splitlines()[-1])
+                self.assertIn('spark.executor.instances=2', recorded['args'])
+                archive_path = Path(recorded['args'][recorded['args'].index('--archives')+1].split('#')[0])
+                archive_path.unlink()
+                archive_path = None
             finally:
                 if archive_path is not None and archive_path.exists() and archive_path.read_bytes() == b'test archive':
                     archive_path.unlink()

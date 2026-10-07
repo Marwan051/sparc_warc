@@ -1,19 +1,52 @@
-# Spark chunking and tagging
+# Spark processing stages
 
-Two independent YARN jobs materialize article chunks and analyze eligible chunks.
-Both default to one concurrent Spark task per requested executor. PostgreSQL reads and writes stay
+Independent YARN jobs materialize chunks, analyze eligible chunks, and embed
+eligible chunks. They default to one concurrent Spark task per requested executor. PostgreSQL reads and writes stay
 on the driver; executors receive bounded payloads and do not need DB credentials.
 
-All three launchers (ingestion, chunking, tagging) delegate packaging and YARN
+All four launchers (ingestion, chunking, tagging, embedding) delegate packaging and YARN
 submission to `scripts/run_processing.sh`. Spark startup and task submission live
 in `jobs/runtime.py` and `jobs/batching.py`. Ingestion retains its original Spark
 retry settings, one-partition-per-file wave, ordered commits, quotas, and recovery
-logic; only chunking/tagging use independent jobs with per-batch completion.
+logic; chunking, tagging, and embedding use independent jobs with per-batch completion.
 
 ```text
 PostgreSQL articles -> driver batches -> Spark cleaning/splitting -> article_chunks
 article_chunks -> driver batches -> Spark analyzer backend -> chunk_analyses
+article_chunks -> driver batches -> Spark ONNX inference -> chunk_embeddings
 ```
+
+## Embedding
+
+Prepare the dedicated embedding environment and local INT8 model once. The
+other services continue to use `.venv`:
+
+```bash
+bash scripts/setup_embedding_onnx_env.sh
+bash scripts/download_quantized_embedding_model.sh
+./scripts/run_embeddings.sh --embedding-limit 100
+```
+
+The model download uses the existing BGE-M3 tokenizer assets and a pinned ONNX
+INT8 graph. The launcher fingerprints and archives the model for YARN workers;
+set `EMBEDDING_MODEL_DIR` when the quantized model lives outside
+`.models/bge-m3-int8`; set `EMBEDDING_SOURCE_MODEL_DIR` when its base tokenizer
+assets live outside `.models/bge-m3`.
+Workers run CPU inference, with max length 256, batch size 1, and one native ONNX
+thread by default. The embedding limit counts scheduled chunks.
+
+Vectors are stored in `chunk_embeddings`, linked to `article_chunks` by
+`page_id`, `chunking_version`, and `chunk_index`. They retain the chunk text hash
+and use `embedding_model` plus a fingerprinted `embedding_version` to identify
+the model files and vector-affecting settings. A migration labels any preexisting
+unversioned vectors `legacy-v0`.
+
+Embedding runs resume by selecting eligible chunks without a row for the chosen
+model and embedding version. Each completed task commits independently; restart
+the same command to continue. Committed rows are idempotent, while a text-hash
+conflict fails explicitly. A different model/configuration fingerprint creates
+a separate vector identity. PostgreSQL must have the pgvector extension
+available to the database role used for schema initialization.
 
 ## Run
 
@@ -30,11 +63,8 @@ export GROQ_API_KEY=your-key
 ```
 
 Export `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, and `PGPASSWORD` as for ingestion.
-Set `SPARK_HOME` to the cluster Spark installation. All three shell launchers
-automatically load the project-root `.env` using `python-dotenv`. Existing exported
-or inline environment variables take precedence, followed by CLI options where
-supported. Missing `.env` files are fine. Values are parsed as dotenv data, not
-executed as shell commands. Direct Python module commands do not load `.env`.
+Set `SPARK_HOME` to the cluster Spark installation. All four shell launchers
+load project-root `.env` defaults; direct Python module commands do not.
 The loader uses the existing `.venv` interpreter (or an externally supplied
 `VENV_DIR`), so that bootstrap environment must contain `requirements/base.txt`.
 The Groq key is delivered through executor environment configuration
@@ -43,7 +73,45 @@ or command-line arguments. Use only a trusted cluster: redaction is not a secret
 store and cluster administrators can access executor environments.
 
 `--dry-run` validates arguments without opening Spark, PostgreSQL, or a provider
-connection and without packaging. Both launchers support `--help`.
+connection and without packaging. All launchers support `--help`.
+
+## Configuration
+
+Precedence is CLI flag > exported/inline variable > `.env` > code default.
+Use flags for run-specific choices and environment variables for credentials,
+cluster paths, and reusable defaults. `--no-dry-run` overrides `DRY_RUN=1`.
+
+| Choice | Flag | Environment fallback |
+|---|---|---|
+| Executor count (3; embedding 2) | `--executor-instances` | `SPARK_EXECUTOR_INSTANCES` |
+| Task concurrency (defaults to executor count) | `--parallel-tasks` | `CHUNK_MAX_PARALLEL_TASKS`, `TAG_MAX_PARALLEL_TASKS`, `EMBED_MAX_PARALLEL_TASKS` |
+| Task size and byte bounds | `--items-per-task`, `--input-bytes`, `--result-bytes` | Stage-prefixed `*_ITEMS_PER_TASK`, `*_TASK_INPUT_BYTES`, `*_TASK_RESULT_BYTES` |
+| Ingestion selection and budgets | `--year`, `--month`, `--num-files`, `--max-files-per-round`, etc. | Uppercase flag name; see [ingestion controls](../README.md#configuration) |
+| Ingestion resume | `--resume-run-id` | `RESUME_RUN_ID` |
+| Embedding model/settings | `--model`, `--max-length`, `--embedding-batch-size` | `EMBEDDING_MODEL`, `EMBEDDING_MAX_LENGTH`, `EMBEDDING_BATCH_SIZE` |
+
+For embedding, use `EMBEDDING_VENV_DIR` to move the dedicated environment
+(`EMBEDDING_ONNX_VENV_DIR` remains an alias). Executor memory/overhead default to
+`512m`/`1g`, fitting one 1.5 GiB YARN container on each 2 GiB worker;
+embedding-specific variables override generic `SPARK_EXECUTOR_MEMORY`
+and `SPARK_EXECUTOR_MEMORY_OVERHEAD`, which override those defaults. Spark fixes
+embedding worker ONNX threads at one. Ingestion resume restores saved selection,
+quotas, and filters: changed `.env` defaults are ignored, but conflicting flags or
+exported variables are rejected.
+
+With three workers at 1.5 GiB each, the application master occupies one worker;
+embedding therefore defaults to two executors and two concurrent tasks. For 50
+pending chunks in batches of ten:
+
+```bash
+./scripts/run_embeddings.sh --items-per-task 10 --embedding-limit 50
+```
+
+Monitor corpus-wide pending embeddings every 10 seconds with
+`./scripts/watch_embeddings.sh` (Ctrl+C stops the monitor, not the job). For a
+limited run, add `--run-limit 50 --starting-embedded N`, where `N` is the
+embedded count recorded before that run started; without a saved baseline, the
+database cannot distinguish that run's remaining work from other pending chunks.
 
 Omit limits to process all pending work. Rerun the same command to resume. The
 chunking document limit counts pending documents, including documents that clean
@@ -63,24 +131,16 @@ specified output file. Legacy JSON results are not imported.
 
 ## Batches, quotas, and recovery
 
-Defaults are 25 documents per chunking task and 10 chunks per tagging task, with
-three concurrent tasks by default. Input payloads are bounded to 2 MiB per task. Output
-limits are 4 MiB for chunking and 1 MiB for tagging. Override with `--input-bytes`
+Defaults are 25 documents per chunking task and 10 chunks per tagging or embedding
+task, with three concurrent tasks for chunking/tagging and two for embedding by default. Input payloads are bounded to 2 MiB per task. Output
+limits are 4 MiB for chunking and 1 MiB for tagging/embedding. Override with `--input-bytes`
 and `--result-bytes`; a single oversized input or output fails explicitly. Reduce
 batch count or increase byte limits to accommodate it. A document is never
 partially materialized.
 
-Environment equivalents are `CHUNK_ITEMS_PER_TASK`, `TAG_ITEMS_PER_TASK`,
-`CHUNK_MAX_PARALLEL_TASKS`, `TAG_MAX_PARALLEL_TASKS`, and stage-prefixed
-`*_TASK_INPUT_BYTES` / `*_TASK_RESULT_BYTES`. CLI arguments take precedence.
-
-Set `SPARK_EXECUTOR_INSTANCES` to a positive integer to choose the fixed executor
-count for any launcher (default 3). Spark dynamic allocation remains disabled.
-Task concurrency defaults to this count; `--parallel-tasks` or the stage-specific
-environment setting overrides it. Ingestion uses `MAX_FILES_PER_ROUND` instead.
-For example, `SPARK_EXECUTOR_INSTANCES=5 ./scripts/run_chunking.sh` requests five
-executors and runs up to five batches per wave. Higher concurrency increases
-driver memory usage and simultaneous provider requests.
+Spark dynamic allocation is disabled. Ingestion uses `--max-files-per-round` for
+file concurrency. Higher task concurrency increases driver memory usage and
+simultaneous provider requests.
 
 The driver submits each task as an independent single-partition Spark job. A
 bounded wave has at most the configured number of parallel jobs, and each completed result is committed
@@ -115,7 +175,7 @@ at defaults). Cumulative attempt counts cover committed outcomes, not calls lost
 to a worker/driver crash. There is no exactly-once billing guarantee.
 
 Stage-specific advisory locks prevent simultaneous coordinators of the same
-kind, while ingestion, chunking, and tagging can run independently. Changes
+kind, while ingestion, chunking, tagging, and embedding can run independently. Changes
 committed after a job's source snapshot are picked up on the next invocation.
 
 ## Backend interface

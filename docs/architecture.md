@@ -104,6 +104,9 @@ memory must be assessed through cluster metrics.
 | `ingest_chunks` | Commit receipts and task statistics |
 | `ingest_files` | Source checkpoints shared across runs |
 | `ingest_schema_versions` | Applied schema migrations |
+| `article_chunks`, `chunk_materializations` | Versioned chunk text and materialization receipts |
+| `chunk_analyses` | Versioned analysis outcomes attached to chunks |
+| `chunk_embeddings` | Versioned pgvector vectors attached to chunks |
 
 The launcher packages Python dependencies and project modules for YARN. Environment
 and Spark-jar fingerprints select reusable archives on HDFS; temporary uploads are
@@ -113,8 +116,8 @@ manual maintenance removes unused versions.
 
 ## Module boundaries
 
-Post-ingestion processing now has two independent Spark jobs: `chunking.pipeline`
-and `tagging.pipeline`, sharing bounded concurrent task submission in `jobs`.
+Post-ingestion processing has independent Spark jobs for chunking, tagging, and
+embedding, sharing bounded concurrent task submission in `jobs`.
 The driver reads PostgreSQL and commits completed batches; executors clean/split
 or run a batch analyzer. See [processing and recovery](processing.md).
 

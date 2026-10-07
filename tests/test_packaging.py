@@ -38,7 +38,9 @@ import tagging
 import jobs
 assert '.zip/' in pipeline.__file__, pipeline.__file__
 assert pipeline.process_file_chunk.__module__ == 'ingestion.pipeline'
-runpy.run_path(sys.argv[1], run_name='__main__')
+entry_point = sys.argv[1]
+sys.argv = [entry_point]
+runpy.run_path(entry_point, run_name='__main__')
 '''
             result = subprocess.run(
                 [sys.executable, '-c', code, str(root / 'scripts/ingest.py')], cwd=directory,

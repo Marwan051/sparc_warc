@@ -7,8 +7,9 @@ counts only newly committed articles toward your requested quotas.
 [Architecture](docs/architecture.md) · [Validation results](docs/validation.md)
 
 For parallel post-ingestion processing, use the independent
-[Spark chunking and tagging jobs](docs/processing.md):
-`scripts/run_chunking.sh` and `scripts/run_tagging.sh`. Both process bounded
+[Spark processing jobs](docs/processing.md):
+`scripts/run_chunking.sh`, `scripts/run_tagging.sh`, and
+`scripts/run_embeddings.sh`. These process bounded
 batches with driver-owned PostgreSQL commits; tagging supports pluggable model
 backends.
 
@@ -43,7 +44,7 @@ The existing `db/db_handler.py` path is retained; the former `extractors`,
 ## Setup
 
 Run ingestion on the Spark master with HDFS and YARN available. The launcher uses
-three executors by default with one core each; set `SPARK_EXECUTOR_INSTANCES`
+three executors by default with one core each; use `--executor-instances` or `SPARK_EXECUTOR_INSTANCES`
 to choose a different fixed count per run. PostgreSQL must be reachable from the master;
 workers need matching Python versions and the interpreter path used by the packed
 virtual environment. The launcher also requires `zip`.
@@ -61,9 +62,10 @@ virtual environment other than `.venv`.
 Dependency files are grouped by use: `requirements/base.txt` for ingestion,
 `requirements/rag.txt` for ingestion plus document/chunking support,
 `requirements/tagging-groq.txt` for RAG plus Groq tagging,
-`requirements/embeddings.txt` for RAG plus vector storage, ONNX CPU embeddings,
-and the retrieval API. Install it with
-`.venv/bin/python -m pip install -r requirements/embeddings.txt`.
+`requirements/embeddings.txt` for the optional retrieval API and local ONNX use.
+The Spark embedding worker instead uses the dedicated `.venv-embedding-onnx`
+prepared by [the embedding setup](docs/processing.md#embedding), keeping `.venv`
+free of embedding-only dependencies.
 `requirements/dev.txt` provides ingestion plus test dependencies. Install the tagging
 and development files to run all optional processing unit tests.
 `chunking/requirements.txt` delegates to `requirements/rag.txt` for compatibility;
@@ -81,8 +83,8 @@ export PGDATABASE=warcdb PGUSER=warc_user PGPASSWORD=password
 ```
 
 Override these environment variables for another database.
-All three Spark shell launchers also load defaults from the project-root `.env`;
-exported or inline environment variables override file values. Install
+All four Spark shell launchers also load defaults from the project-root `.env`;
+CLI flags override exported variables, which override `.env`. Install
 `requirements/base.txt` for the dotenv loader. The `.env` file is Git-ignored.
 
 The VMware host helpers
@@ -94,7 +96,7 @@ the VMs and Hadoop services; run them on the Debian host, not inside a VM.
 Request 1,000 new articles, with a maximum of 100 from each source file:
 
 ```bash
-NUM_FILES=all MAX_ACCEPTED_ARTICLES=1000 MAX_ACCEPTED_PER_FILE=100 ./scripts/run_ingestion.sh
+./scripts/run_ingestion.sh --num-files all --max-accepted-articles 1000 --max-accepted-per-file 100
 ```
 
 Duplicates, rejected articles, and unsuccessful inserts do not consume quota.
@@ -104,13 +106,13 @@ files until the total is reached or the sources are exhausted.
 For a small smoke test:
 
 ```bash
-NUM_FILES=1 MAX_ACCEPTED_ARTICLES=10 MAX_ACCEPTED_PER_FILE=10 ./scripts/run_ingestion.sh
+./scripts/run_ingestion.sh --num-files 1 --max-accepted-articles 10 --max-accepted-per-file 10
 ```
 
 To validate configuration without submitting a job:
 
 ```bash
-DRY_RUN=1 MAX_ACCEPTED_ARTICLES=1000 ./scripts/run_ingestion.sh
+./scripts/run_ingestion.sh --dry-run --max-accepted-articles 1000
 ```
 
 The final summary reports committed counts, per-file status, rejection counters,
@@ -120,11 +122,11 @@ and `2` when the selected sources cannot fulfill the target.
 ## Resume
 
 ```bash
-RESUME_RUN_ID=<printed-run-id> ./scripts/run_ingestion.sh
+./scripts/run_ingestion.sh --resume-run-id <printed-run-id>
 ```
 
 Resume restores the original file selection, quotas, and filtering settings.
-Explicit conflicting overrides are rejected. Resource budgets and concurrency can
+Explicit CLI or exported-environment conflicts are rejected; changed `.env` defaults do not block resume. Resource budgets and concurrency can
 be adjusted; article and HTML size limits remain fixed for that run. Dry run shows
 supplied/default settings without loading a saved run.
 
@@ -134,7 +136,10 @@ only a file read to EOF is marked exhausted.
 
 ## Configuration
 
-Application configuration uses environment variables. Byte limits are integer bytes.
+Ingestion accepts `--lower-kebab-case` flags for these variables (for example,
+`--worker-max-candidates` for `WORKER_MAX_CANDIDATES`). Byte limits are integer
+bytes. For shared precedence and processing flags, see
+[configuration](docs/processing.md#configuration).
 
 | Variable | Default | Purpose |
 |---|---:|---|
@@ -171,7 +176,8 @@ or result budgets to lower memory pressure; keep the result budget at least as
 large as `MAX_ARTICLE_BYTES`. Input/time limits can overshoot by a record and parser
 lookahead. See [memory bounds](docs/architecture.md#memory-bounds) for details.
 
-Set `NO_PROGRESS=1` to hide the progress bar and wave output. `USE_HDFS_CACHE=1`
+Use `--no-progress` or `NO_PROGRESS=1` to hide the progress bar and wave output.
+`USE_HDFS_CACHE=1`
 shares packaged dependencies and Spark jars under `HDFS_APPS_DIR` (default:
 `/user/$USER/apps/spark`). Set it to `0` for per-run uploads. The obsolete
 `MAX_EXTRACTED_PER_ROUND` setting is rejected; use the worker budgets above.

@@ -157,6 +157,7 @@ def init_db(conn=None):
                 from db.vector_schema import DDL
                 cur.execute(DDL)
                 cur.execute("INSERT INTO ingest_schema_versions(version) VALUES (4)")
+            cur.execute("SELECT 1 FROM ingest_schema_versions WHERE version=5")
         conn.commit()
     except Exception:
         conn.rollback()

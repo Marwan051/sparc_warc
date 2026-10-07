@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Export important article tables to CSV, then copy to the HGFS share.
+# Export article and enrichment tables to CSV, then copy to the HGFS share.
 # Usage:
 #   export PGHOST=... PGPORT=... PGDATABASE=... PGUSER=... PGPASSWORD=...
 #   ./scripts/export_csv.sh [csv_dir] [dest_dir]
@@ -16,22 +16,37 @@ export PGUSER="${PGUSER:-warc_user}"
 export PGPASSWORD="${PGPASSWORD:-password}"
 mkdir -p "$CSV_DIR"
 
-echo "Exporting article tables to $CSV_DIR (db: $PGHOST:$PGPORT/$PGDATABASE as $PGUSER)"
+echo "Exporting article and enrichment tables to $CSV_DIR (db: $PGHOST:$PGPORT/$PGDATABASE as $PGUSER)"
 
-psql -v ON_ERROR_STOP=1 -c "\copy (SELECT * FROM websites ORDER BY id) TO '$CSV_DIR/websites.csv' WITH CSV HEADER"
-psql -v ON_ERROR_STOP=1 -c "\copy (SELECT * FROM authors ORDER BY id) TO '$CSV_DIR/authors.csv' WITH CSV HEADER"
-psql -v ON_ERROR_STOP=1 -c "\copy (SELECT * FROM pages ORDER BY id) TO '$CSV_DIR/pages.csv' WITH CSV HEADER"
-psql -v ON_ERROR_STOP=1 -c "\copy (SELECT * FROM metadata ORDER BY page_id) TO '$CSV_DIR/metadata.csv' WITH CSV HEADER"
-psql -v ON_ERROR_STOP=1 -c "\copy (SELECT * FROM content ORDER BY page_id) TO '$CSV_DIR/content.csv' WITH CSV HEADER"
+TABLES=(websites authors pages metadata content chunk_materializations article_chunks chunk_analyses chunk_embeddings)
+ORDER_BY=(
+  'id' 'id' 'id' 'page_id' 'page_id'
+  'page_id, chunking_version'
+  'page_id, chunking_version, chunk_index'
+  'page_id, chunking_version, chunk_index, backend, model, analysis_version'
+  'page_id, chunking_version, chunk_index, embedding_model, embedding_version'
+)
+STAGING_DIR="$(mktemp -d "$CSV_DIR/.export-XXXXXX")"
+trap 'rm -rf -- "$STAGING_DIR"' EXIT
+CSV_FILES=()
+for i in "${!TABLES[@]}"; do
+  table="${TABLES[$i]}"
+  psql -X -q -v ON_ERROR_STOP=1 \
+    -c "COPY (SELECT * FROM $table ORDER BY ${ORDER_BY[$i]}) TO STDOUT WITH CSV HEADER" \
+    > "$STAGING_DIR/$table.csv"
+done
+for table in "${TABLES[@]}"; do
+  mv -f "$STAGING_DIR/$table.csv" "$CSV_DIR/$table.csv"
+  CSV_FILES+=("$CSV_DIR/$table.csv")
+done
 
 echo "Row counts:"
-for t in websites authors pages metadata content; do
-  printf '  %-8s %s rows\n' "$t" "$(psql -tA -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM $t;")"
+for table in "${TABLES[@]}"; do
+  printf '  %-23s %s rows\n' "$table" "$(psql -X -tA -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM $table;")"
 done
 ls -lh "$CSV_DIR"
 
 mkdir -p "$DEST_DIR"
-cp -f "$CSV_DIR"/websites.csv "$CSV_DIR"/authors.csv "$CSV_DIR"/pages.csv \
-      "$CSV_DIR"/metadata.csv "$CSV_DIR"/content.csv "$DEST_DIR"/
-echo "Copied 5 CSVs to $DEST_DIR:"
+cp -f "${CSV_FILES[@]}" "$DEST_DIR"/
+echo "Copied ${#TABLES[@]} CSVs to $DEST_DIR:"
 ls -lh "$DEST_DIR"

@@ -191,12 +191,17 @@ After a run finishes:
 ./scripts/export_csv.sh
 ```
 
-The export writes the five article tables to `exports/` under the project root and copies them to
-`/mnt/hgfs/copy_path/warcdb_csv/`. Optional arguments override both directories:
+The export writes nine article and enrichment tables (including chunks,
+analyses, and embeddings) to `exports/` under the project root and copies them
+to `/mnt/hgfs/copy_path/warcdb_csv/`. Optional arguments override both directories:
 
 ```bash
 ./scripts/export_csv.sh ./exports /path/to/destination
 ```
+
+`chunk_embeddings.csv` contains the full pgvector values and can be large.
+Exporting during an embedding run captures only rows committed so far; rerun
+after completion for a complete export.
 
 ## RAG integration
 

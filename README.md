@@ -4,7 +4,8 @@ Stream Common Crawl News archives into PostgreSQL using Apache Spark. The pipeli
 extracts article text and metadata, keeps Arabic, English, and French content, and
 counts only newly committed articles toward your requested quotas.
 
-[Architecture](docs/architecture.md) · [Validation results](docs/validation.md)
+[Architecture](docs/architecture.md) · [Validation results](docs/validation.md) ·
+[RAG API plan](docs/rag-api-plan.md)
 
 For parallel post-ingestion processing, use the independent
 [Spark processing jobs](docs/processing.md):
@@ -62,7 +63,9 @@ virtual environment other than `.venv`.
 Dependency files are grouped by use: `requirements/base.txt` for ingestion,
 `requirements/rag.txt` for ingestion plus document/chunking support,
 `requirements/tagging-groq.txt` for RAG plus Groq tagging,
-`requirements/embeddings.txt` for the optional retrieval API and local ONNX use.
+`requirements/embeddings.txt` for the optional retrieval API and local ONNX use,
+and `requirements/rag-agent.txt` for the standalone query agent without the
+ingestion, Spark, or web-server dependencies.
 The Spark embedding worker instead uses the dedicated `.venv-embedding-onnx`
 prepared by [the embedding setup](docs/processing.md#embedding), keeping `.venv`
 free of embedding-only dependencies.
@@ -216,6 +219,44 @@ from chunking.splitters import iter_document_chunks
 for chunk in iter_document_chunks(iter_documents()):
     print(chunk.metadata["doc_id"])
 ```
+
+### Ask the vector database
+
+Create a dedicated agent environment, configure PostgreSQL and Groq, and point
+to the same local BGE-M3 model files used to create the stored vectors. This
+keeps both `.venv` and the packaged Spark worker environment unchanged:
+
+```bash
+python3 -m venv .venv-rag
+.venv-rag/bin/python -m pip install -r requirements/rag-agent.txt
+export GROQ_API_KEY=your-key
+.venv-rag/bin/python scripts/ask.py "What happened, and why did it matter?"
+```
+
+The command always prints the retrieved evidence after the answer, including
+chunk IDs, cosine scores, matched subqueries, sources, and full chunk text. This
+diagnostic evidence is also printed when the agent reports insufficient evidence.
+
+The importable interface is asynchronous:
+
+```python
+from retrieval import answer
+
+result = await answer("What happened, and why did it matter?")
+print(result.answer)
+```
+
+The agent uses `qwen/qwen3.8-27b` to create at most three semantic queries,
+embeds them in one BGE-M3 batch, and runs exact cosine searches concurrently.
+Repeated and identical evidence is deduplicated, and adjacent retrieved chunks
+are joined without expanding to unranked neighbors. One targeted follow-up round
+is permitted when evidence for part of the question is missing.
+
+`TOP_K` defaults to `5` per query and `RAG_DB_CONCURRENCY` defaults to `3`.
+`RAG_MODEL`, `CHUNKING_VERSION`, `EMBEDDING_MODEL`, and `EMBEDDING_VERSION` can
+override their detected defaults. Exact cosine search intentionally does not use
+the current inner-product HNSW index; a cosine or normalized inner-product HNSW
+retriever can replace the database search later without changing the agent.
 
 `RAG_FETCH_BATCH_SIZE` defaults to 1,000 rows. The eager
 `load_documents_distributed()` helper requires `limit=` or `RAG_DOCUMENT_LIMIT`.

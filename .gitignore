@@ -4,6 +4,7 @@ __pycache__/
 !.env.example
 *.py[cod]
 .venv/
+.venv-rag/
 .venv-embedding/
 .venv-embedding-onnx/
 create/

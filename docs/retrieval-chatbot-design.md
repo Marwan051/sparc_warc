@@ -1,8 +1,7 @@
 # Retrieval and Chatbot Design
 
-This document records the agreed design for connecting vector retrieval to the
-separate chatbot answering module. It is an implementation guide, not a description
-of functionality that already exists.
+This document describes the bounded retrieval and answering workflow implemented
+in `retrieval/` and exposed by `scripts/ask.py`.
 
 ## Decisions
 
@@ -18,9 +17,9 @@ of functionality that already exists.
   can decompose a multi-part question when useful.
 - The chatbot may request one additional retrieval round after identifying the
   specific evidence that is missing.
-- Use ordinary Python and `asyncio` for the initial bounded workflow. LangGraph is
-  deferred until durable checkpoints, human approval, multiple tools, or more
-  complicated loops justify it.
+- Use LangChain Core prompt pipelines plus ordinary Python and `asyncio` for the
+  bounded workflow. LangGraph is deferred until durable checkpoints, human
+  approval, multiple tools, or more complicated loops justify it.
 - Do not import the sibling fake retriever or its current retry loop. Repeating the
   same deterministic search without changing the query or search parameters is not
   corrective retrieval.
@@ -33,7 +32,8 @@ The retrieval service is deterministic and does not decide user intent. It:
 
 1. Accepts one to three search queries.
 2. Embeds all queries in one batch with the existing BGE-M3 implementation.
-3. Searches the versioned `chunk_embeddings` rows through pgvector.
+3. Searches the versioned `chunk_embeddings` rows through exact pgvector cosine
+   distance.
 4. Returns the top results for each query, preserving the query-to-result mapping.
 5. Deduplicates repeated chunks while retaining every query that matched them.
 6. Returns chunk text, similarity, stable chunk identity, URL, title, language,
@@ -109,10 +109,11 @@ It can determine whether the evidence supports the claim; it cannot establish th
 the source itself is factually true. Reranking and grounding models are deferred
 until labeled evaluations demonstrate a need.
 
-## Tool contract without an orchestration framework
+## Structured agent contract
 
-The chatbot's search tool is a JSON contract implemented by application code. No
-agent framework is required.
+The chatbot's search decisions are Pydantic contracts produced through LangChain
+structured output. Application code validates the query and round limits before
+calling retrieval.
 
 ```json
 {
@@ -149,8 +150,7 @@ After retrieval, the chatbot returns either an answer action or a targeted retry
 }
 ```
 
-Define these actions as validated Pydantic models. The application invokes the
-corresponding Python function, appends its result to the chatbot conversation, and
+These actions are validated Pydantic models. The application invokes retrieval and
 asks the chatbot for the next structured action. The model never receives database
 credentials or executes code.
 
@@ -160,15 +160,14 @@ For a batch of decomposed queries:
 
 1. Call `generate_embeddings()` once with the full list. This is more efficient
    than starting one ONNX invocation per query.
-2. Run the synchronous ONNX batch through `asyncio.to_thread()` so it does not
-   block an asynchronous API event loop.
-3. Start one pgvector search per query with `asyncio.gather()` or
-   `asyncio.TaskGroup`.
-4. Because the project currently uses synchronous `psycopg2`, run each search
-   through `asyncio.to_thread()` and give it a separate connection from a
-   `ThreadedConnectionPool`. Never share a connection or cursor between concurrent
-   searches.
-5. Bound database search concurrency with an `asyncio.Semaphore`.
+2. Run the synchronous ONNX batch in an owned coordinator worker so it does not
+   block callers and command-line shutdown does not depend on asyncio's global
+   executor.
+3. Start one pgvector search per query with `asyncio.gather()`.
+4. Because the project uses synchronous `psycopg2`, run each search in that
+   executor and open a separate connection for it. Never share a connection or
+   cursor between concurrent searches.
+5. Bound database search concurrency with the executor's worker count.
 
 Initial operational limits are:
 
@@ -178,6 +177,11 @@ maximum retrieval rounds:        2
 maximum concurrent DB searches:  3
 embedding inference concurrency: 1 batch per process
 ```
+
+The initial implementation uses exhaustive `vector <=> query_vector` ordering.
+The schema's existing `vector_ip_ops` HNSW index remains untouched but is not used
+by this exact cosine query. Switching to approximate indexed retrieval is confined
+to the retrieval store.
 
 These limits must be enforced by application code rather than accepted from model
 output. The service also controls `top_k`, timeouts, database filters, and permitted

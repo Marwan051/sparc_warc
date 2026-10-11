@@ -3,7 +3,7 @@ import re
 import json
 from typing import Dict, Any, List
 from selectolax.parser import HTMLParser
-from ingestion.text import decode_and_validate, is_valid_arabic_text
+from ingestion.text import decode_and_validate, is_clean_encoding, is_valid_arabic_text
 
 ARABIC_PATTERN = re.compile(r'[\u0600-\u06FF]')
 LATIN_PATTERN = re.compile(r'[a-zA-Z]')
@@ -258,6 +258,15 @@ def extract_html_fields(record: Dict[str, Any], min_words: int = 80, use_trafila
         clean_text = " ".join(raw_text.split())
         extraction = "selectolax"
     clean_text = clean_text.replace("\x00", "")
+    # Validate what will actually be classified and stored. Corruption in the
+    # article body can be diluted by markup when the raw HTML is checked above.
+    if not is_clean_encoding(clean_text):
+        return {
+            "language": "corrupted",
+            "word_count": 0,
+            "clean_text": "",
+            "extraction": extraction,
+        }
     word_cnt = len(clean_text.split())
     if word_cnt < min_words:
         return {"language": "too_short", "word_count": word_cnt, "clean_text": "", "extraction": extraction}

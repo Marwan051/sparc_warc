@@ -24,8 +24,14 @@ def is_clean_encoding(text: str) -> bool:
     if not text or "\ufffd" in text or "\x00" in text:
         return False
     # Ordinary accented Latin letters are valid French. Flag characteristic
-    # UTF-8-as-Latin-1 byte sequences instead of treating every accent as bad.
-    mojibake = re.findall(r"(?:Ã[\x80-\xBF]|Â[\x80-\xBF]|â[\x80-\xBF]{2})", text)
+    # UTF-8-as-single-byte-codepage sequences instead of treating every accent
+    # as bad. The à²/à³ prefixes are UTF-8 Kannada bytes decoded as cp1256;
+    # page 121 repeated them throughout an article and looked like French to
+    # the language detector.
+    mojibake = re.findall(
+        r"(?:Ã[\x80-\xBF]|Â[\x80-\xBF]|â[\x80-\xBF]{2}|à[²³])",
+        text,
+    )
     if len(mojibake) >= 3 and sum(map(len, mojibake)) / len(text) > 0.01:
         return False
     controls = sum(1 for c in text if ord(c) < 32 and c not in "\n\r\t\f")

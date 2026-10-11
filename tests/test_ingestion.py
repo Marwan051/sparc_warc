@@ -21,7 +21,7 @@ from ingestion import pipeline as job
 from db import db_handler as db
 from ingestion.warc import parse_warc_records_streaming, ValidatedGzipStream
 from ingestion.extraction import extract_html_fields, _language_sample
-from ingestion.text import decode_and_validate
+from ingestion.text import decode_and_validate, is_clean_encoding
 
 
 def make_warc(count=6, payload=None, content_type='text/html', http_encoding=None):
@@ -145,6 +145,19 @@ class UnitTests(unittest.TestCase):
         self.assertEqual(fields['published_date'], '2026-05-01')
         self.assertIn('élèves', fields['clean_text'])
         self.assertEqual(decode_and_validate(prose.encode('cp1252'), 'cp1252')[1], 'success')
+
+    def test_extracted_cp1256_mojibake_is_rejected(self):
+        mojibake = ('à²µà²¿à²œà²¯à³Œ à²®à²¤ à²µà²¿à²­à²œà²¨à³†. ' * 20).strip()
+        html = ('<html><body>' + ('Valid page chrome. ' * 100) + '</body></html>').encode()
+        record = dict(raw_bytes=html, url='https://example.com/article', warc_date=None)
+
+        self.assertFalse(is_clean_encoding(mojibake))
+        with patch('ingestion.extraction._trafilatura_text', return_value=mojibake):
+            fields = extract_html_fields(record, 10, True)
+
+        self.assertEqual(fields['language'], 'corrupted')
+        self.assertEqual(fields['clean_text'], '')
+        self.assertEqual(fields['extraction'], 'trafilatura')
 
     def test_language_sample_has_no_overlap(self):
         text = ''.join(chr(0x1000+i) for i in range(2001))

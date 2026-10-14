@@ -21,6 +21,7 @@ import urllib.request
 from datetime import datetime, timezone
 from jobs.runtime import start_spark
 from jobs.batching import execute_batch
+from jobs.validation import integer, env_int
 
 
 from db.db_handler import (
@@ -86,14 +87,7 @@ def load_config(argv=None):
         return value if value is not None else os.environ.get(name, default)
 
     def number(name, default, minimum):
-        raw = chosen(name, default)
-        try:
-            value = int(raw)
-        except (TypeError, ValueError) as error:
-            raise ValueError(f"{name} must be an integer, got {raw!r}") from error
-        if value < minimum:
-            raise ValueError(f"{name} must be at least {minimum}, got {value}")
-        return value
+        return integer(chosen(name, default), name=name, minimum=minimum)
 
     def boolean(name, default):
         raw = chosen(name, default)
@@ -108,15 +102,9 @@ def load_config(argv=None):
     if not (year.isdigit() and len(year) == 4 and month.isdigit() and 1 <= int(month) <= 12):
         raise ValueError("YEAR/MONTH must identify a valid YYYY/MM manifest")
     if options.executor_instances is None:
-        raw_executors = os.environ.get("SPARK_EXECUTOR_INSTANCES", "3")
-        try:
-            executors = int(raw_executors)
-        except ValueError as error:
-            raise ValueError(f"SPARK_EXECUTOR_INSTANCES must be an integer, got {raw_executors!r}") from error
+        executors = env_int("SPARK_EXECUTOR_INSTANCES", 3, minimum=1)
     else:
-        executors = options.executor_instances
-    if executors < 1:
-        raise ValueError("SPARK_EXECUTOR_INSTANCES must be at least 1")
+        executors = integer(options.executor_instances, name="SPARK_EXECUTOR_INSTANCES", minimum=1)
     config = {
         "year": year,
         "month": month,

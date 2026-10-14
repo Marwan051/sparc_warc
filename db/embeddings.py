@@ -7,36 +7,31 @@ import numpy as np
 from pgvector.psycopg2 import register_vector
 from psycopg2.extras import execute_values
 
-from db.db_handler import get_connection
+from db.db_handler import get_connection, streaming_cursor
 
 
 def iter_pending(config, limit=None):
     """Stream eligible chunks that lack this model/configuration's vector."""
-    conn = get_connection()
-    try:
-        with conn.cursor(name="embedding_source") as cur:
-            cur.itersize = 25
-            cur.execute("""SELECT c.page_id,c.chunk_index,c.chunk_text,c.text_hash
-                FROM article_chunks c
-                WHERE c.chunking_version=%s AND c.eligible
-                    AND NOT EXISTS (
-                        SELECT 1 FROM chunk_embeddings e
-                        WHERE e.page_id=c.page_id
-                          AND e.chunking_version=c.chunking_version
-                          AND e.chunk_index=c.chunk_index
-                          AND e.embedding_model=%s
-                          AND e.embedding_version=%s)
-                ORDER BY c.page_id,c.chunk_index LIMIT %s""",
-                (config["chunking_version"], config["embedding_model"],
-                 config["embedding_version"], limit))
-            for page_id, index, text, text_hash in cur:
-                actual_hash = hashlib.sha256(text.encode()).hexdigest()
-                if actual_hash != text_hash:
-                    raise ValueError(f"stored chunk hash mismatch for page {page_id}, chunk {index}")
-                yield {"page_id": page_id, "chunking_version": config["chunking_version"],
-                       "chunk_index": index, "text": text, "text_hash": text_hash}
-    finally:
-        conn.close()
+    with streaming_cursor("embedding_source", itersize=25, connection_factory=get_connection) as cur:
+        cur.execute("""SELECT c.page_id,c.chunk_index,c.chunk_text,c.text_hash
+            FROM article_chunks c
+            WHERE c.chunking_version=%s AND c.eligible
+                AND NOT EXISTS (
+                    SELECT 1 FROM chunk_embeddings e
+                    WHERE e.page_id=c.page_id
+                      AND e.chunking_version=c.chunking_version
+                      AND e.chunk_index=c.chunk_index
+                      AND e.embedding_model=%s
+                      AND e.embedding_version=%s)
+            ORDER BY c.page_id,c.chunk_index LIMIT %s""",
+            (config["chunking_version"], config["embedding_model"],
+             config["embedding_version"], limit))
+        for page_id, index, text, text_hash in cur:
+            actual_hash = hashlib.sha256(text.encode()).hexdigest()
+            if actual_hash != text_hash:
+                raise ValueError(f"stored chunk hash mismatch for page {page_id}, chunk {index}")
+            yield {"page_id": page_id, "chunking_version": config["chunking_version"],
+                   "chunk_index": index, "text": text, "text_hash": text_hash}
 
 
 def commit_batch(conn, config, rows):

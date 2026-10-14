@@ -4,7 +4,7 @@ import json
 import os
 import tempfile
 from psycopg2.extras import execute_values
-from db.db_handler import get_connection
+from db.db_handler import get_connection, streaming_cursor
 
 
 def identity(config):
@@ -12,24 +12,19 @@ def identity(config):
 
 
 def iter_pending(config, limit=None, retry_errors=False):
-    conn = get_connection()
-    try:
-        with conn.cursor(name="analysis_source") as cur:
-            cur.itersize = 30
-            cur.execute("""SELECT c.page_id,c.chunk_index,c.chunk_text,m.language,m.title
-                FROM article_chunks c LEFT JOIN metadata m ON m.page_id=c.page_id
-                LEFT JOIN chunk_analyses a ON a.page_id=c.page_id
-                    AND a.chunking_version=c.chunking_version AND a.chunk_index=c.chunk_index
-                    AND a.backend=%s AND a.model=%s AND a.analysis_version=%s
-                WHERE c.chunking_version=%s AND c.eligible
-                    AND (a.status IS NULL OR (%s AND a.status='ERROR'))
-                ORDER BY c.page_id,c.chunk_index LIMIT %s""",
-                (config["backend"],config["model"],config["analysis_version"],config["chunking_version"],retry_errors,limit))
-            for page_id, index, text, language, title in cur:
-                yield {"page_id": page_id, "chunk_index": index, "text": text,
-                       "language": language or "", "title": title or ""}
-    finally:
-        conn.close()
+    with streaming_cursor("analysis_source", itersize=30, connection_factory=get_connection) as cur:
+        cur.execute("""SELECT c.page_id,c.chunk_index,c.chunk_text,m.language,m.title
+            FROM article_chunks c LEFT JOIN metadata m ON m.page_id=c.page_id
+            LEFT JOIN chunk_analyses a ON a.page_id=c.page_id
+                AND a.chunking_version=c.chunking_version AND a.chunk_index=c.chunk_index
+                AND a.backend=%s AND a.model=%s AND a.analysis_version=%s
+            WHERE c.chunking_version=%s AND c.eligible
+                AND (a.status IS NULL OR (%s AND a.status='ERROR'))
+            ORDER BY c.page_id,c.chunk_index LIMIT %s""",
+            (config["backend"],config["model"],config["analysis_version"],config["chunking_version"],retry_errors,limit))
+        for page_id, index, text, language, title in cur:
+            yield {"page_id": page_id, "chunk_index": index, "text": text,
+                   "language": language or "", "title": title or ""}
 
 
 def commit_batch(conn, config, batch_id, outcomes):

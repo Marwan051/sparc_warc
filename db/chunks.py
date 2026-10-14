@@ -3,7 +3,7 @@
 import hashlib
 import json
 from psycopg2.extras import execute_values
-from db.db_handler import get_connection
+from db.db_handler import get_connection, streaming_cursor
 
 
 def source_hash(document):
@@ -27,22 +27,17 @@ def acquire_lock(stage):
 
 def iter_pending_documents(conn, version, limit=None):
     # Separate read connection: driver commits must not invalidate this cursor.
-    read = get_connection()
-    try:
-        with read.cursor(name="chunk_source") as cur:
-            cur.itersize = 25
-            cur.execute("""SELECT p.id, c.cleaned_text, p.url, m.title, m.language
-                FROM pages p JOIN content c ON c.page_id=p.id
-                LEFT JOIN metadata m ON m.page_id=p.id
-                WHERE c.cleaned_text IS NOT NULL AND NOT EXISTS (
-                    SELECT 1 FROM chunk_materializations r
-                    WHERE r.page_id=p.id AND r.chunking_version=%s)
-                ORDER BY p.id LIMIT %s""", (version, limit))
-            for page_id, text, url, title, language in cur:
-                yield {"page_id": page_id, "text": text, "source": url,
-                       "title": title or "", "language": language or ""}
-    finally:
-        read.close()
+    with streaming_cursor("chunk_source", itersize=25, connection_factory=get_connection) as cur:
+        cur.execute("""SELECT p.id, c.cleaned_text, p.url, m.title, m.language
+            FROM pages p JOIN content c ON c.page_id=p.id
+            LEFT JOIN metadata m ON m.page_id=p.id
+            WHERE c.cleaned_text IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM chunk_materializations r
+                WHERE r.page_id=p.id AND r.chunking_version=%s)
+            ORDER BY p.id LIMIT %s""", (version, limit))
+        for page_id, text, url, title, language in cur:
+            yield {"page_id": page_id, "text": text, "source": url,
+                   "title": title or "", "language": language or ""}
 
 
 def commit_document(conn, version, result):

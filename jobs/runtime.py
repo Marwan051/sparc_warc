@@ -4,24 +4,32 @@ import argparse
 import json
 import os
 import sys
+from contextlib import contextmanager
+
+from jobs.validation import env_int, positive_int
 
 
-def env_int(name, default, *, minimum=0):
-    raw = os.environ.get(name, str(default)).strip()
+positive = positive_int  # Compatibility for existing runtime imports.
+
+
+@contextmanager
+def processing_session(stage, cfg):
+    """Own the processing coordinator lock and Spark session for one job."""
+    from db.chunks import acquire_lock
+    from db.db_handler import init_db
+
+    init_db()
+    conn = acquire_lock({"chunk": "chunking", "tag": "tagging", "embed": "embedding"}[stage])
+    spark = None
     try:
-        value = int(raw)
-    except ValueError as error:
-        raise ValueError(f"{name} must be an integer, got {raw!r}") from error
-    if value < minimum:
-        raise ValueError(f"{name} must be at least {minimum}, got {value}")
-    return value
-
-
-def positive(value):
-    number = int(value)
-    if number < 1:
-        raise argparse.ArgumentTypeError("must be positive")
-    return number
+        spark = start_spark(stage, cfg)
+        yield conn, spark
+    finally:
+        try:
+            if spark is not None:
+                spark.stop()
+        finally:
+            conn.close()
 
 
 def config(stage, argv=None):

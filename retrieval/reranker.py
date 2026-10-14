@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+from jobs.validation import env_int
 
 
 @dataclass(frozen=True) 
@@ -22,9 +23,9 @@ class RerankerConfig:
         )
     ).expanduser().resolve()
 
-        max_length = _positive_int("RERANKER_MAX_LENGTH",512)
-        batch_size = _positive_int("RERANKER_BATCH_SIZE",4)
-        intra_op_threads = _positive_int("RERANKER_INTRA_OP_THREADS",1)
+        max_length = env_int("RERANKER_MAX_LENGTH", 512, minimum=1)
+        batch_size = env_int("RERANKER_BATCH_SIZE", 4, minimum=1)
+        intra_op_threads = env_int("RERANKER_INTRA_OP_THREADS", 1, minimum=1)
 
         return cls(
         model_dir=model_dir,
@@ -32,22 +33,6 @@ class RerankerConfig:
         batch_size=batch_size,
         intra_op_threads=intra_op_threads,
     )       
-
-
-def _positive_int(name: str, default: int) -> int:
-    raw = os.environ.get(name, str(default))
-
-    try:
-        value = int(raw)
-    except ValueError as error:
-        raise ValueError(
-            f"{name} must be an integer, got {raw!r}"
-        ) from error
-
-    if value < 1:
-        raise ValueError(f"{name} must be at least 1, got {value}")
-
-    return value
 
 
 def sigmoid(logits: np.ndarray) -> np.ndarray:

@@ -8,7 +8,7 @@ from datetime import datetime
 
 from chunking import CHUNKING_VERSION
 from jobs.environment import load_environment
-from jobs.runtime import env_int, positive
+from jobs.validation import env_int, positive_int as positive
 
 
 def read_counts(chunking_version, model, embedding_version):

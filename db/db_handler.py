@@ -34,6 +34,21 @@ def get_connection():
     return psycopg2.connect(**_db_config())
 
 
+@contextmanager
+def streaming_cursor(name, *, itersize, connection_factory=None):
+    """Own a named cursor on a separate connection, independent of writer commits."""
+    conn = (connection_factory or get_connection)()
+    try:
+        cur = conn.cursor(name=name)
+        try:
+            cur.itersize = itersize
+            yield cur
+        finally:
+            cur.close()
+    finally:
+        conn.close()
+
+
 def connection_scope(function):
     """Reuse the coordinator connection, or own a short standalone session."""
     @wraps(function)

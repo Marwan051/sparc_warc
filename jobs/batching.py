@@ -9,6 +9,17 @@ def serialized_size(value):
     return len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
 
 
+def check_result_size(result, max_bytes, message):
+    if serialized_size(result) > max_bytes:
+        raise ValueError(message)
+
+
+def batch_tasks(source, cfg, make_task):
+    """Build stage-specific tasks lazily from bounded input batches."""
+    for batch in batches(source, cfg["items_per_task"], cfg["input_bytes"]):
+        yield make_task(batch)
+
+
 def batches(items, max_items, max_bytes):
     batch, size = [], 2
     for item in items:

@@ -1,7 +1,7 @@
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
-import threading
 
 import numpy as np
 
@@ -90,7 +90,7 @@ def validate_logits(logits:np.ndarray,expected_count:int) ->np.ndarray:
 class OnnxReranker:
     def __init__(self, config: RerankerConfig | None = None):
         self.config :RerankerConfig =config or RerankerConfig.from_environment()
-        self._tokenizer = None
+        self._tokenizer= None
         self._session = None 
         self._input_names: set[str] = set()
         self._output_name: str | None = None
@@ -120,7 +120,7 @@ class OnnxReranker:
             options.inter_op_num_threads = 1
             options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
 
-            session = ort.InferenceSession(model_path,
+            session = ort.InferenceSession(str(model_path),
                 sess_options=options,
                 providers=["CPUExecutionProvider"],
                 )
@@ -153,23 +153,80 @@ class OnnxReranker:
 
             output_name = outputs[0].name
 
-            # Publish validated state.
             self._tokenizer = tokenizer
             self._input_names = input_names
             self._output_name = output_name
 
-            # Set this last: it means loading completed successfully.
             self._session = session
 
 
     def score(self, pairs: list[tuple[str, str]]) -> np.ndarray:
-        ...
+        if not pairs:
+            return np.empty(0,dtype=np.float32)
+        for pair in pairs:
+            if (
+                not isinstance(pair, tuple)
+                or len(pair) != 2
+                or not all(isinstance(value, str) for value in pair)
+                ):
+                raise TypeError(
+                    "each reranker pair must be a (query, passage) tuple of strings"
+                )        
+        batches = []
+        for start in range(0, len(pairs), self.config.batch_size):
+            batch = pairs[start:start + self.config.batch_size]
+            batches.append(self._run_batch(batch))
+
+        logits = np.concatenate(batches)
+        logits = validate_logits(logits, len(pairs))
+        return sigmoid(logits) 
 
     def _tokenize(self, pairs: list[tuple[str, str]]) -> dict[str, np.ndarray]:
-        ...
+        queries = [query for query,_ in pairs]
+        passages = [passage for _,passage in pairs]
+        if self._tokenizer is None:
+            raise RuntimeError("Reranker tokenizer was not initialized")
+        tokens = self._tokenizer(queries,passages,padding=True,truncation=True,max_length=self.config.max_length,return_tensors="np")
+        missing = self._input_names.difference(tokens)
+        if missing:
+            raise RuntimeError(
+                "Tokenizer did not produce required reranker inputs: "
+                f"{sorted(missing)}"
+            )
+
+        return {
+            name: np.asarray(tokens[name])
+            for name in self._input_names
+        } 
+    
 
     def _run_batch(self, pairs: list[tuple[str, str]]) -> np.ndarray:
-        ...
+        if not pairs:
+            return np.empty(0,dtype=np.float32)
+
+        self.ensure_loaded()
+
+        if self._session is None or self._output_name is None:
+            raise RuntimeError("Reranker was not initialized correctly")
+        assert self._tokenizer is not None
+        inputs= self._tokenize(pairs)
+
+        with self._inference_lock:
+            outputs = self._session.run([self._output_name],inputs)
+            if len(outputs) != 1:
+                raise RuntimeError(
+                    f"Expected one reranker output, received {len(outputs)}"
+                    )
+
+            raw_logits = outputs[0]
+            if not isinstance(raw_logits, np.ndarray):
+                raise TypeError(
+                    "Expected dense reranker logits, "
+                    f"received {type(raw_logits).__name__}"
+                    )
+    
+        return validate_logits(raw_logits, len(pairs))
+            
 
 
 

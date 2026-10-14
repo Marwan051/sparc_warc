@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Callable
 
 import numpy as np
 from pgvector.psycopg2 import register_vector
@@ -15,6 +15,8 @@ from chunking import CHUNKING_VERSION
 from db.db_handler import get_connection
 from embeddings.embeddings import generate_embeddings, model_version
 from retrieval.models import SearchQuery, Source
+from retrieval.ranking import rerank_query_groups
+from retrieval.reranker import OnnxReranker
 
 
 @dataclass(frozen=True)
@@ -23,11 +25,15 @@ class RetrievalConfig:
     embedding_model: str
     embedding_version: str
     top_k: int = 5
+    candidate_k:int = 20
     max_concurrent_searches: int = 3
 
     @classmethod
-    def from_environment(cls) -> "RetrievalConfig":
+    def from_environment(cls) -> RetrievalConfig:
         max_length = _positive_int("EMBEDDING_MAX_LENGTH", 256)
+        candidate_k=_positive_int("RERANKER_CANDIDATE_K", 20)
+        if candidate_k < cls.top_k:
+            raise ValueError("Number of candidates can not be less than the top candidates to get")
         return cls(
             chunking_version=os.environ.get("CHUNKING_VERSION", CHUNKING_VERSION),
             embedding_model=os.environ.get("EMBEDDING_MODEL", "BAAI/bge-m3-int8"),
@@ -37,15 +43,16 @@ class RetrievalConfig:
         )
 
 
-@dataclass(frozen=True)
+@dataclass
 class SearchHit:
-    page_id: int
+    page_id: int 
     chunk_index: int
     text_hash: str
     text: str
     similarity: float
     query_id: str
     source: Source
+    reranker_score: float | None = None
 
     @property
     def chunk_id(self) -> str:
@@ -87,9 +94,10 @@ class VectorRetriever:
     """Batch query embedding followed by bounded parallel exact searches."""
 
     def __init__(self, config: RetrievalConfig | None = None,
-                 embedder: Callable[[list[str]], np.ndarray] = generate_embeddings):
+                 embedder: Callable[[list[str]], np.ndarray] = generate_embeddings,reranker: OnnxReranker | None = None,):
         self.config = config or RetrievalConfig.from_environment()
         self.embedder = embedder
+        self.reranker = reranker or OnnxReranker()
 
     async def retrieve(self, queries: list[SearchQuery]) -> list[SearchHit]:
         if not queries or len(queries) > 3:
@@ -102,18 +110,27 @@ class VectorRetriever:
                 await asyncio.sleep(0.01)
             groups = future.result()
         return [hit for group in groups for hit in group]
-
+    
     def _retrieve_sync(self, queries: list[SearchQuery]) -> list[list[SearchHit]]:
+        vectors = self._embed_queries(queries)
+        groups = self._search_queries(queries, vectors)
+        return rerank_query_groups(queries, groups, self.reranker, self.config.top_k)
+
+    def _embed_queries(self, queries: list[SearchQuery]) -> np.ndarray:
         vectors = self.embedder([item.query for item in queries])
         if np.asarray(vectors).shape != (len(queries), 1024):
             raise ValueError("query embedder must return one 1024-dimensional vector per query")
+        return vectors
+
+    def _search_queries(self, queries: list[SearchQuery], vectors: np.ndarray) -> list[list[SearchHit]]:
         with ThreadPoolExecutor(max_workers=self.config.max_concurrent_searches,
-                                thread_name_prefix="rag-search") as executor:
+                                 thread_name_prefix="rag-search") as executor:
             futures = [
-                executor.submit(self._search_one, query, np.asarray(vector, dtype=np.float32))
-                for query, vector in zip(queries, vectors)
-            ]
-            return [future.result() for future in futures]
+                 executor.submit(self._search_one, query, np.asarray(vector, dtype=np.float32))
+                 for query, vector in zip(queries, vectors)
+             ]
+        return [future.result() for future in futures]
+
 
     def _search_one(self, query: SearchQuery, vector: np.ndarray) -> list[SearchHit]:
         conn = get_connection()
@@ -126,7 +143,7 @@ class VectorRetriever:
                     self.config.embedding_model,
                     self.config.embedding_version,
                     vector,
-                    self.config.top_k,
+                    self.config.candidate_k,
                 ))
                 rows = cur.fetchall()
             conn.rollback()

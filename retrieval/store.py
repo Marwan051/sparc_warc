@@ -32,13 +32,15 @@ class RetrievalConfig:
     def from_environment(cls) -> RetrievalConfig:
         max_length = _positive_int("EMBEDDING_MAX_LENGTH", 256)
         candidate_k=_positive_int("RERANKER_CANDIDATE_K", 20)
-        if candidate_k < cls.top_k:
+        top_k = _positive_int("TOP_K", 5)
+        if candidate_k < top_k:
             raise ValueError("Number of candidates can not be less than the top candidates to get")
         return cls(
             chunking_version=os.environ.get("CHUNKING_VERSION", CHUNKING_VERSION),
             embedding_model=os.environ.get("EMBEDDING_MODEL", "BAAI/bge-m3-int8"),
             embedding_version=os.environ.get("EMBEDDING_VERSION") or model_version(max_length),
             top_k=_positive_int("TOP_K", 5),
+            candidate_k=_positive_int("RERANKER_CANDIDATE_K",20),
             max_concurrent_searches=_positive_int("RAG_DB_CONCURRENCY", 3),
         )
 
@@ -117,9 +119,11 @@ class VectorRetriever:
         return rerank_query_groups(queries, groups, self.reranker, self.config.top_k)
 
     def _embed_queries(self, queries: list[SearchQuery]) -> np.ndarray:
-        vectors = self.embedder([item.query for item in queries])
-        if np.asarray(vectors).shape != (len(queries), 1024):
+        vectors = np.asarray(self.embedder([item.query for item in queries]), dtype=np.float32)
+        if vectors.shape != (len(queries), 1024):
             raise ValueError("query embedder must return one 1024-dimensional vector per query")
+        if not np.all(np.isfinite(vectors)):
+            raise ValueError("query embedder returned a non-finite vector")
         return vectors
 
     def _search_queries(self, queries: list[SearchQuery], vectors: np.ndarray) -> list[list[SearchHit]]:

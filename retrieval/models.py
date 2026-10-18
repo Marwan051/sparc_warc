@@ -60,6 +60,7 @@ class Evidence(BaseModel):
     text: str
     chunk_ids: list[str]
     query_ids: list[str]
+    reranker_score: float
     similarity: float
     sources: list[Source]
 

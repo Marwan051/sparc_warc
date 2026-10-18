@@ -1,9 +1,17 @@
-from typing import Sequence
+from __future__ import annotations
+
+from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 import numpy as np
 
+if TYPE_CHECKING:                            
+    from retrieval.reranker import OnnxReranker
+    from retrieval.store import SearchHit, SearchQuery
+
+
 from retrieval.store import SearchHit, SearchQuery
-from retrieval.reranker import OnnxReranker
+
 
 def build_reranker_inputs(
     queries: list[SearchQuery],

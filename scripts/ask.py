@@ -18,7 +18,7 @@ def _print_evidence(evidence):
         return
     for index, item in enumerate(evidence, 1):
         print(f"\n[{index}] chunks={','.join(item.chunk_ids)} "
-              f"cosine={item.similarity:.6f} queries={','.join(item.query_ids)}")
+            f"rernaker_similarity={item.reranker_score:.6f} cosine={item.similarity:.6f} queries={','.join(item.query_ids)}")
         for source in item.sources:
             print(f"Source: {source.title} | {source.url}")
         print(item.text)

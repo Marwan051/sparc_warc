@@ -94,14 +94,14 @@ leave another part without evidence.
 | Missing-evidence analysis | Chatbot LLM after seeing retrieved chunks |
 | Follow-up query generation | Chatbot LLM, at most one round |
 | Answer generation | Separate chatbot LLM |
-| Candidate reranking | Optional multilingual cross-encoder, added only after evaluation |
+| Candidate reranking | Multilingual BGE cross-encoder over the top pgvector candidates |
 | Answer grounding | Optional multilingual NLI cross-encoder in the chatbot module |
 
 A bi-encoder embeds queries and chunks independently, which makes corpus search
 efficient. A reranking cross-encoder reads a query and candidate chunk together and
-produces a more precise relevance score, but it requires one inference per pair.
-If introduced, apply it only to a small pgvector candidate set, such as the top
-10-30 results.
+produces a more precise relevance score, but it requires one inference per pair,
+so it is applied only to a small pgvector candidate set (`RERANKER_CANDIDATE_K`,
+default 20) and the best `TOP_K` per query are kept.
 
 A grounding cross-encoder performs a different task. It reads an answer claim and
 its cited evidence together and predicts entailment, neutrality, or contradiction.
@@ -207,12 +207,16 @@ BGE-M3 embedding code, and pgvector index.
 
 ## Deferred features and evaluation gates
 
-Start with BGE-M3 and pgvector ranking. Before adding a reranker, CRAG evaluator,
-or grounding model, create a multilingual labeled set of real questions and
-expected chunks. Measure at least Recall@k, MRR, per-language results, latency, and
-the rate at which a corrective search adds useful evidence.
+The BGE cross-encoder reranker is implemented as the second retrieval stage:
+pgvector returns `RERANKER_CANDIDATE_K` candidates per generated query, the
+cross-encoder scores each `(query, chunk)` pair, and the best `TOP_K` per query are
+kept. Its scores are not stored in PostgreSQL.
 
-Add a reranker only if relevant chunks are retrieved but ordered poorly. Add a
-grounding checker only when unsupported chatbot claims remain a measured problem.
-Add LangGraph only when the bounded Python state machine can no longer express the
-required workflow cleanly.
+Before treating reranking as production-ready, create a multilingual labeled set of
+real questions and expected chunks and record at least Recall@20, reranked MRR@5
+and Recall@5, per-language results, reranking latency per candidate set, end-to-end
+latency, and peak process RSS.
+
+Add a grounding checker only when unsupported chatbot claims remain a measured
+problem. Add LangGraph only when the bounded Python state machine can no longer
+express the required workflow cleanly.

@@ -12,15 +12,32 @@ AVAILABLE = all(importlib.util.find_spec(name) is not None for name in (
 ))
 
 
+class FakeReranker:
+    """Deterministic stand-in so tests never load the 570 MB ONNX model."""
+
+    def __init__(self, scores=None):
+        self.scores = list(scores) if scores is not None else None
+        self.calls = []
+
+    def score(self, pairs):
+        import numpy as np
+        self.calls.append(list(pairs))
+        if not pairs:
+            return np.empty(0, dtype=np.float32)
+        if self.scores is not None:
+            return np.asarray(self.scores, dtype=np.float32)
+        return np.linspace(0.9, 0.1, len(pairs), dtype=np.float32)
+
+
 @unittest.skipUnless(AVAILABLE, "install requirements/rag-agent.txt for retrieval tests")
 class EvidenceTests(unittest.TestCase):
     @staticmethod
-    def hit(page, chunk, text, query="q1", score=0.8, url=None):
+    def hit(page, chunk, text, query="q1", score=0.8, url=None, reranker=0.5):
         from retrieval.models import Source
         from retrieval.store import SearchHit
         return SearchHit(
             page_id=page, chunk_index=chunk, text_hash=f"hash-{page}-{chunk}",
-            text=text, similarity=score, query_id=query,
+            text=text, similarity=score, query_id=query, reranker_score=reranker,
             source=Source(page_id=page, url=url or f"https://example.com/{page}",
                           title=f"Title {page}", publisher="Publisher", author="Author",
                           language="en", published_date="2026-01-01"),
@@ -29,32 +46,40 @@ class EvidenceTests(unittest.TestCase):
     def test_deduplicates_hits_and_merges_only_retrieved_adjacent_chunks(self):
         from retrieval.evidence import assemble_evidence
         evidence = assemble_evidence([
-            self.hit(1, 0, "alpha shared", "q1", 0.7),
-            self.hit(1, 0, "alpha shared", "q2", 0.9),
-            self.hit(1, 1, "shared beta", "q2", 0.8),
-            self.hit(1, 3, "not adjacent", "q1", 0.6),
+            self.hit(1, 0, "alpha shared", "q1", 0.7, reranker=0.3),
+            self.hit(1, 0, "alpha shared", "q2", 0.9, reranker=0.6),
+            self.hit(1, 1, "shared beta", "q2", 0.8, reranker=0.9),
+            self.hit(1, 3, "not adjacent", "q1", 0.6, reranker=0.1),
         ])
         self.assertEqual(len(evidence), 2)
         merged = next(item for item in evidence if item.chunk_ids == ["p1:c0", "p1:c1"])
         self.assertEqual(merged.text, "alpha shared beta")
         self.assertEqual(merged.query_ids, ["q1", "q2"])
         self.assertEqual(merged.similarity, 0.9)
+        self.assertEqual(merged.reranker_score, 0.9)
 
     def test_deduplicates_identical_text_across_articles_and_keeps_sources(self):
         from retrieval.evidence import assemble_evidence
         evidence = assemble_evidence([
-            self.hit(1, 2, "same text", url="https://one.example"),
-            self.hit(2, 7, "same text", url="https://two.example"),
+            self.hit(1, 2, "same text", url="https://one.example", reranker=0.2),
+            self.hit(2, 7, "same text", url="https://two.example", reranker=0.8),
         ])
         self.assertEqual(len(evidence), 1)
         self.assertEqual(evidence[0].chunk_ids, ["p1:c2", "p2:c7"])
         self.assertEqual(len(evidence[0].sources), 2)
+        self.assertEqual(evidence[0].reranker_score, 0.8)
+
+    def test_unscored_hit_raises_before_assembly(self):
+        from retrieval.evidence import assemble_evidence
+        with self.assertRaises(RuntimeError):
+            assemble_evidence([self.hit(1, 0, "alpha", reranker=None)])
 
     def test_cli_prints_full_retrieved_evidence(self):
         from retrieval.evidence import assemble_evidence
         from scripts.ask import _print_evidence
         evidence = assemble_evidence([
-            self.hit(1, 2, "the complete retrieved chunk", query="comparison", score=0.8123456),
+            self.hit(1, 2, "the complete retrieved chunk", query="comparison",
+                     score=0.8123456, reranker=0.7),
         ])
         output = StringIO()
         with redirect_stdout(output):
@@ -63,6 +88,7 @@ class EvidenceTests(unittest.TestCase):
         self.assertIn("Retrieved evidence:", rendered)
         self.assertIn("chunks=p1:c2", rendered)
         self.assertIn("cosine=0.812346", rendered)
+        self.assertIn("reranker=0.700000", rendered)
         self.assertIn("queries=comparison", rendered)
         self.assertIn("the complete retrieved chunk", rendered)
 
@@ -71,7 +97,11 @@ class EvidenceTests(unittest.TestCase):
 class StoreTests(unittest.IsolatedAsyncioTestCase):
     def config(self, concurrency=3):
         from retrieval.store import RetrievalConfig
-        return RetrievalConfig("chunks-v1", "model", "model-v1", 5, concurrency)
+        return RetrievalConfig(
+            chunking_version="chunks-v1", embedding_model="model",
+            embedding_version="model-v1", top_k=5, candidate_k=20,
+            max_concurrent_searches=concurrency,
+        )
 
     def test_search_uses_exact_cosine_and_version_filters(self):
         import numpy as np
@@ -83,7 +113,7 @@ class StoreTests(unittest.IsolatedAsyncioTestCase):
         cursor.fetchall.return_value = []
         conn = Mock()
         conn.cursor.return_value = cursor
-        retriever = VectorRetriever(self.config(), embedder=Mock())
+        retriever = VectorRetriever(self.config(), embedder=Mock(), reranker=FakeReranker())
         vector = np.zeros(1024, dtype=np.float32)
         with patch("retrieval.store.get_connection", return_value=conn), \
              patch("retrieval.store.register_vector"):
@@ -108,7 +138,7 @@ class StoreTests(unittest.IsolatedAsyncioTestCase):
             calls.append(list(texts))
             return np.zeros((len(texts), 1024), dtype=np.float32)
 
-        retriever = VectorRetriever(self.config(), embedder=embed)
+        retriever = VectorRetriever(self.config(), embedder=embed, reranker=FakeReranker())
 
         def search(query, vector):
             nonlocal active, max_active

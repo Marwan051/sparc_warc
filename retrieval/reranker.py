@@ -17,22 +17,22 @@ class RerankerConfig:
     @classmethod
     def from_environment(cls) -> "RerankerConfig":
         model_dir = Path(
-        os.environ.get(
-            "RERANKER_MODEL_DIR",
-            ".models/bge-reranker-v2-m3-int8",
-        )
-    ).expanduser().resolve()
+            os.environ.get(
+                "RERANKER_MODEL_DIR",
+                ".models/bge-reranker-v2-m3-int8",
+            )
+        ).expanduser().resolve()
 
         max_length = env_int("RERANKER_MAX_LENGTH", 512, minimum=1)
         batch_size = env_int("RERANKER_BATCH_SIZE", 4, minimum=1)
         intra_op_threads = env_int("RERANKER_INTRA_OP_THREADS", 1, minimum=1)
 
         return cls(
-        model_dir=model_dir,
-        max_length=max_length,
-        batch_size=batch_size,
-        intra_op_threads=intra_op_threads,
-    )       
+            model_dir=model_dir,
+            max_length=max_length,
+            batch_size=batch_size,
+            intra_op_threads=intra_op_threads,
+        )
 
 
 def sigmoid(logits: np.ndarray) -> np.ndarray:
@@ -74,13 +74,14 @@ def validate_logits(logits:np.ndarray,expected_count:int) ->np.ndarray:
 
 class OnnxReranker:
     def __init__(self, config: RerankerConfig | None = None):
-        self.config :RerankerConfig =config or RerankerConfig.from_environment()
-        self._tokenizer= None
-        self._session = None 
+        self.config: RerankerConfig = config or RerankerConfig.from_environment()
+        self._tokenizer = None
+        self._session = None
         self._input_names: set[str] = set()
         self._output_name: str | None = None
-        self._load_lock =threading.Lock()
+        self._load_lock = threading.Lock()
         self._inference_lock = threading.Lock()
+        self.ensure_loaded()
 
 
     def ensure_loaded(self) -> None:

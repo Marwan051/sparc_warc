@@ -112,7 +112,7 @@ def _format_evidence(evidence: list[Evidence]) -> str:
             f"Chunk IDs: {', '.join(item.chunk_ids)}\n"
             f"Matched queries: {', '.join(item.query_ids)}\n"
             f"Cosine similarity: {item.similarity:.6f}\n"
-            f"Reranker Score: {item.reranker_score:.6f} \n" 
+            f"Reranker relevance: {item.reranker_score:.6f}\n"
             f"Sources: {source_text}\n"
             f"Text: {item.text}"
         )

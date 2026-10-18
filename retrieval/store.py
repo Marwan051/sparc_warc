@@ -14,10 +14,10 @@ from pgvector.psycopg2 import register_vector
 from chunking import CHUNKING_VERSION
 from db.db_handler import get_connection
 from embeddings.embeddings import generate_embeddings, model_version
+from jobs.validation import env_int
 from retrieval.models import SearchQuery, Source
 from retrieval.ranking import rerank_query_groups
 from retrieval.reranker import OnnxReranker
-from jobs.validation import env_int
 
 
 @dataclass(frozen=True)
@@ -48,7 +48,7 @@ class RetrievalConfig:
 
 @dataclass
 class SearchHit:
-    page_id: int 
+    page_id: int
     chunk_index: int
     text_hash: str
     text: str
@@ -85,8 +85,12 @@ LIMIT %s
 class VectorRetriever:
     """Batch query embedding followed by bounded parallel exact searches."""
 
-    def __init__(self, config: RetrievalConfig | None = None,
-                 embedder: Callable[[list[str]], np.ndarray] = generate_embeddings,reranker: OnnxReranker | None = None,):
+    def __init__(
+        self,
+        config: RetrievalConfig | None = None,
+        embedder: Callable[[list[str]], np.ndarray] = generate_embeddings,
+        reranker: OnnxReranker | None = None,
+    ):
         self.config = config or RetrievalConfig.from_environment()
         self.embedder = embedder
         self.reranker = reranker or OnnxReranker()

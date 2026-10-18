@@ -234,8 +234,9 @@ export GROQ_API_KEY=your-key
 ```
 
 The command always prints the retrieved evidence after the answer, including
-chunk IDs, cosine scores, matched subqueries, sources, and full chunk text. This
-diagnostic evidence is also printed when the agent reports insufficient evidence.
+chunk IDs, reranker and cosine scores, matched subqueries, sources, and full
+chunk text. This diagnostic evidence is also printed when the agent reports
+insufficient evidence.
 
 The importable interface is asynchronous:
 
@@ -248,11 +249,29 @@ print(result.answer)
 
 The agent uses `qwen/qwen3.8-27b` to create at most three semantic queries,
 embeds them in one BGE-M3 batch, and runs exact cosine searches concurrently.
-Repeated and identical evidence is deduplicated, and adjacent retrieved chunks
-are joined without expanding to unranked neighbors. One targeted follow-up round
-is permitted when evidence for part of the question is missing.
+Each query returns `RERANKER_CANDIDATE_K` (default `20`) cosine candidates, which
+a BGE cross-encoder reranks before the best `TOP_K` per query are kept. Repeated
+and identical evidence is deduplicated, and adjacent retrieved chunks are joined
+without expanding to unranked neighbors. One targeted follow-up round is
+permitted when evidence for part of the question is missing.
 
-`TOP_K` defaults to `5` per query and `RAG_DB_CONCURRENCY` defaults to `3`.
+Download the reranker once into `.models/bge-reranker-v2-m3-int8`:
+
+```bash
+bash scripts/download_quantized_reranker_model.sh
+```
+
+The reranker runs locally in the `.venv-rag` process (not on Spark), because its
+score depends on a query and a chunk together and cannot be precomputed. The
+process holds both the BGE-M3 embedding model and the reranker ONNX graph in
+memory, so allow for roughly two 570 MB-class graphs plus ONNX/tokenizer
+overhead. Missing or corrupt model files stop the request with a clear error;
+there is no silent fallback to cosine-only ranking.
+
+`TOP_K` defaults to `5` per query, `RERANKER_CANDIDATE_K` to `20`, and
+`RAG_DB_CONCURRENCY` to `3`, with `RERANKER_CANDIDATE_K >= TOP_K` enforced.
+`RERANKER_MODEL_DIR`, `RERANKER_MAX_LENGTH`, `RERANKER_BATCH_SIZE`, and
+`RERANKER_INTRA_OP_THREADS` tune the cross-encoder.
 `RAG_MODEL`, `CHUNKING_VERSION`, `EMBEDDING_MODEL`, and `EMBEDDING_VERSION` can
 override their detected defaults. Exact cosine search intentionally does not use
 the current inner-product HNSW index; a cosine or normalized inner-product HNSW

@@ -5,6 +5,7 @@ numpy>=1.26,<3
 pydantic>=2,<3
 langchain-core>=1,<2
 langchain-groq>=1,<2
+langchain-google-genai>=4,<5
 pgvector>=0.3,<1
 onnxruntime>=1.20,<2
 transformers>=4.45,<6

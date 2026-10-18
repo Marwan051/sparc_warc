@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-import os
 import re
 
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_groq import ChatGroq
 
 from retrieval.evidence import assemble_evidence
+from retrieval.llm import (
+    build_chat_model, resolve_model, resolve_provider, retryable_errors,
+    structured_output_kwargs,
+)
 from retrieval.models import (
     AgentDecision, Evidence, GroundedAnswer, QueryPlan, RagResult, SearchQuery,
 )
@@ -24,7 +26,12 @@ and the user's language. Do not answer the question."""),
 ])
 
 _DECISION_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", """You are a grounded multilingual news archive assistant. Infer
+    ("system", """LANGUAGE RULE (highest priority): The evidence may be in a
+different language than the question. Always write the entire answer in the
+language of the Original question, translating facts as needed. Never reply in
+the evidence's language unless it matches the question's language.
+
+You are a grounded multilingual news archive assistant. Infer
 the intended meaning of informal, dialectal, or grammatically imperfect
 questions. Use only the supplied evidence. First check whether any passage
 contains a concrete fact that responds to the intended topic. If one does,
@@ -35,9 +42,9 @@ supports only one example for a broad or plural request, give that example and
 explicitly state that the retrieved archive does not establish a complete list.
 Incomplete coverage is not the same as no evidence.
 
-For an answer, obey Required answer language exactly, use at most 180 words, cite
-claims inline with chunk IDs such as [p12:c3], and copy the IDs into citations.
-If a critical aspect is missing and another search is allowed, return
+For an answer, write it in the required answer language, use at most 180 words,
+cite claims inline with chunk IDs such as [p12:c3], and copy the IDs into
+citations. If a critical aspect is missing and another search is allowed, return
 action='search_more' with one to three targeted queries. When another search is
 not allowed, answer with a limitation if any relevant fact exists. Return
 action='insufficient' only when every supplied passage is unrelated to the
@@ -50,11 +57,19 @@ Required answer language: {answer_language}
 Another search is allowed: {retry_allowed}
 
 Evidence:
-{evidence}"""),
+{evidence}
+
+Reminder: write your entire answer in the language of the Original question,
+even when the evidence is in a different language."""),
 ])
 
 _FINAL_ANSWER_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", """Your task is to produce the most useful grounded response, not
+    ("system", """LANGUAGE RULE (highest priority): The evidence may be in a
+different language than the question. Always write the entire answer in the
+language of the Original question, translating facts as needed. Never reply in
+the evidence's language unless it matches the question's language.
+
+Your task is to produce the most useful grounded response, not
 to demand exhaustive coverage. Infer the meaning of informal, dialectal, or
 grammatically imperfect questions and use only the supplied news evidence.
 
@@ -63,8 +78,8 @@ Rules:
    you MUST return a non-empty answer based on that fact.
 2. A broad or plural question can be answered with one supported example; state
    clearly that the archive does not establish a complete list.
-3. Obey Required answer language exactly and translate the supported facts into
-   it. Match the user's dialect when requested.
+3. Write the answer in the required answer language and translate the supported
+   facts into it. Match the user's dialect when requested.
 4. Use at most 180 words. Cite factual claims inline with exact chunk IDs such as
    [p12:c3] and copy those IDs into citations.
 5. Return an empty answer only if every passage is unrelated to the intended
@@ -75,28 +90,60 @@ Rules:
 Required answer language: {answer_language}
 
 Evidence:
-{evidence}"""),
+{evidence}
+
+Reminder: write your entire answer in the language of the Original question,
+even when the evidence is in a different language."""),
 ])
 
 
 def _unique_queries(queries: list[SearchQuery],
                     previous: list[SearchQuery] | None = None) -> list[SearchQuery]:
-    seen = {item.query.casefold() for item in (previous or [])}
+    previous = previous or []
+    seen = {item.query.casefold() for item in previous}
+    used_ids = {item.id for item in previous}
     result = []
+    counter = 1
     for item in queries:
         key = item.query.casefold()
-        if key not in seen:
-            seen.add(key)
-            result.append(item)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        while f"q{counter}" in used_ids:
+            counter += 1
+        query_id = f"q{counter}"
+        used_ids.add(query_id)
+        counter += 1
+        result.append(item.model_copy(update={"id": query_id}))
         if len(result) == 3:
             break
     return result
 
 
+async def _structured_invoke(chain, payload: dict, attempts: int = 2):
+    """Retry once when a provider fails to produce valid structured output."""
+    retryable = retryable_errors()
+    last_error: Exception | None = None
+    for _ in range(attempts):
+        try:
+            return await chain.ainvoke(payload)
+        except retryable as error:
+            last_error = error
+    assert last_error is not None
+    raise last_error
+
+
+_ANSWER_LANGUAGE = (
+    "the language of the Original question. Detect it from the question text alone, "
+    "never from the evidence. If the question is in a dialect, match that dialect. "
+    "Translate evidence facts as needed so the entire answer is in that language"
+)
+
+
 def _answer_language(question: str) -> str:
-    if re.search(r"[\u0600-\u06ff]", question):
-        return "Arabic; match the user's dialect when possible"
-    return "the same language as the original question"
+    # The model reliably knows the question's language; this directive only forces
+    # it to key off the question instead of the (possibly different) evidence.
+    return _ANSWER_LANGUAGE
 
 
 def _format_evidence(evidence: list[Evidence]) -> str:
@@ -126,26 +173,18 @@ class RagAgent:
         self.retriever = retriever or VectorRetriever()
         injected_decider = decider is not None
         if planner is None or decider is None:
-            api_key = os.environ.get("GROQ_API_KEY")
-            if not api_key:
-                raise ValueError("GROQ_API_KEY is required")
-            llm = ChatGroq(
-                model=os.environ.get("RAG_MODEL", "qwen/qwen3.8-27b"),
-                temperature=0,
-                max_tokens=2400,
-                max_retries=2,
-                api_key=api_key,
-                reasoning_effort="none",
-            )
+            provider = resolve_provider()
+            model = resolve_model(provider)
+            llm = build_chat_model(provider, model)
+            structured = structured_output_kwargs(provider)
             planner = planner or (
-                _PLAN_PROMPT | llm.with_structured_output(QueryPlan, method="json_schema")
+                _PLAN_PROMPT | llm.with_structured_output(QueryPlan, **structured)
             )
             decider = decider or (
-                _DECISION_PROMPT | llm.with_structured_output(AgentDecision, method="json_schema")
+                _DECISION_PROMPT | llm.with_structured_output(AgentDecision, **structured)
             )
             finalizer = finalizer or (
-                _FINAL_ANSWER_PROMPT
-                | llm.with_structured_output(GroundedAnswer, method="json_schema")
+                _FINAL_ANSWER_PROMPT | llm.with_structured_output(GroundedAnswer, **structured)
             )
         elif finalizer is None and injected_decider:
             # Test/custom chains can handle both decision shapes themselves.
@@ -159,7 +198,7 @@ class RagAgent:
         if not question:
             raise ValueError("question must not be empty")
 
-        plan = await self.planner.ainvoke({"question": question})
+        plan = await _structured_invoke(self.planner, {"question": question})
         queries = _unique_queries(plan.queries)
         if not queries:
             raise ValueError("query planner returned no usable queries")
@@ -183,7 +222,7 @@ class RagAgent:
         return self._result(question, queries, evidence, rounds, decision)
 
     async def _decide(self, question: str, evidence: list[Evidence], retry_allowed: bool):
-        return await self.decider.ainvoke({
+        return await _structured_invoke(self.decider, {
             "question": question,
             "answer_language": _answer_language(question),
             "retry_allowed": "yes" if retry_allowed else "no",
@@ -191,7 +230,7 @@ class RagAgent:
         })
 
     async def _finalize(self, question: str, evidence: list[Evidence]) -> AgentDecision:
-        final = await self.finalizer.ainvoke({
+        final = await _structured_invoke(self.finalizer, {
             "question": question,
             "answer_language": _answer_language(question),
             "evidence": _format_evidence(evidence),
@@ -202,6 +241,8 @@ class RagAgent:
             action="answer" if final.answer else "insufficient",
             answer=final.answer,
             citations=final.citations,
+            reason="",
+            queries=[],
         )
 
     @staticmethod

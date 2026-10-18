@@ -247,8 +247,20 @@ result = await answer("What happened, and why did it matter?")
 print(result.answer)
 ```
 
-The agent uses `qwen/qwen3.8-27b` to create at most three semantic queries,
-embeds them in one BGE-M3 batch, and runs exact cosine searches concurrently.
+The agent uses `openai/gpt-oss-120b` (override with `RAG_MODEL`) to create at most
+three semantic queries, embeds them in one BGE-M3 batch, and runs exact cosine
+searches concurrently. It runs that model at `RAG_REASONING_EFFORT=medium`: at
+`low`, gpt-oss-120b ignores the answer-language rule and mirrors the evidence's
+language (or drifts to an unrelated one), so `medium` is the lowest setting that
+reliably answers in the question's language.
+
+Two providers are supported and switching is one variable. Set
+`RAG_MODEL=gemini-3.5-flash-lite` (plus `GEMINI_API_KEY`) to run on Google; the
+provider is inferred from the model name (`gemini*`/`gemma*` → Google, otherwise
+Groq). Set `RAG_PROVIDER=groq|gemini` to force a provider, and a blank `RAG_MODEL`
+falls back to the provider default (`groq` → `openai/gpt-oss-120b`, `gemini` →
+`gemini-3.5-flash-lite`). Both paths use `json_schema` structured output; the
+Gemini client drops the `strict`/`additionalProperties` flags its API rejects.
 Each query returns `RERANKER_CANDIDATE_K` (default `20`) cosine candidates, which
 a BGE cross-encoder reranks before the best `TOP_K` per query are kept. Repeated
 and identical evidence is deduplicated, and adjacent retrieved chunks are joined
@@ -272,8 +284,11 @@ there is no silent fallback to cosine-only ranking.
 `RAG_DB_CONCURRENCY` to `3`, with `RERANKER_CANDIDATE_K >= TOP_K` enforced.
 `RERANKER_MODEL_DIR`, `RERANKER_MAX_LENGTH`, `RERANKER_BATCH_SIZE`, and
 `RERANKER_INTRA_OP_THREADS` tune the cross-encoder.
-`RAG_MODEL`, `CHUNKING_VERSION`, `EMBEDDING_MODEL`, and `EMBEDDING_VERSION` can
-override their detected defaults. Exact cosine search intentionally does not use
+`RAG_MODEL`, `RAG_PROVIDER`, `RAG_REASONING_EFFORT`, `CHUNKING_VERSION`,
+`EMBEDDING_MODEL`, and `EMBEDDING_VERSION` can override their detected defaults.
+The `groq` provider uses strict `json_schema` structured output with
+`openai/gpt-oss-120b`; the `gemini` provider uses `json_schema` with
+`gemini-3.5-flash-lite` (see `requirements/rag-agent.txt`). Exact cosine search intentionally does not use
 the current inner-product HNSW index; a cosine or normalized inner-product HNSW
 retriever can replace the database search later without changing the agent.
 

@@ -181,7 +181,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
     def hit(query_id="main"):
         return EvidenceTests.hit(3, 4, "supported fact", query_id, 0.91)
 
-    def test_configures_groq_native_json_schema_output(self):
+    def test_groq_uses_strict_json_schema_output(self):
         from langchain_core.runnables import RunnableLambda
         from retrieval.agent import RagAgent
         methods = []
@@ -191,8 +191,31 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                 methods.append((schema.__name__, kwargs))
                 return RunnableLambda(lambda value: value)
 
-        with patch.dict("os.environ", {"GROQ_API_KEY": "test-key"}), \
-             patch("retrieval.agent.ChatGroq", return_value=Llm()):
+        env = {"RAG_PROVIDER": "groq", "RAG_MODEL": "openai/gpt-oss-120b",
+               "GROQ_API_KEY": "test-key", "RAG_REASONING_EFFORT": "medium"}
+        with patch.dict("os.environ", env), \
+             patch("retrieval.agent.build_chat_model", return_value=Llm()):
+            RagAgent(retriever=Mock())
+        self.assertEqual(methods, [
+            ("QueryPlan", {"method": "json_schema", "strict": True}),
+            ("AgentDecision", {"method": "json_schema", "strict": True}),
+            ("GroundedAnswer", {"method": "json_schema", "strict": True}),
+        ])
+
+    def test_gemini_uses_plain_json_schema_output(self):
+        from langchain_core.runnables import RunnableLambda
+        from retrieval.agent import RagAgent
+        methods = []
+
+        class Llm:
+            def with_structured_output(self, schema, **kwargs):
+                methods.append((schema.__name__, kwargs))
+                return RunnableLambda(lambda value: value)
+
+        env = {"RAG_PROVIDER": "gemini", "RAG_MODEL": "gemini-3.5-flash-lite",
+               "GEMINI_API_KEY": "test-key"}
+        with patch.dict("os.environ", env), \
+             patch("retrieval.agent.build_chat_model", return_value=Llm()):
             RagAgent(retriever=Mock())
         self.assertEqual(methods, [
             ("QueryPlan", {"method": "json_schema"}),
@@ -200,15 +223,41 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             ("GroundedAnswer", {"method": "json_schema"}),
         ])
 
-    def test_arabic_questions_require_arabic_answers(self):
-        from retrieval.agent import _answer_language
-        self.assertEqual(
-            _answer_language("إزاي الفلوس بتتنقل بين الدول؟"),
-            "Arabic; match the user's dialect when possible",
+    def test_answer_language_directive_keys_off_the_question(self):
+        from retrieval.agent import _ANSWER_LANGUAGE, _answer_language
+        self.assertEqual(_answer_language("أي سؤال"), _ANSWER_LANGUAGE)
+        self.assertEqual(_answer_language("any question"), _ANSWER_LANGUAGE)
+        self.assertIn("Original question", _ANSWER_LANGUAGE)
+        self.assertIn("never from the evidence", _ANSWER_LANGUAGE)
+
+    def test_decision_and_final_prompts_enforce_question_language(self):
+        from retrieval.agent import _ANSWER_LANGUAGE, _DECISION_PROMPT, _FINAL_ANSWER_PROMPT
+        decision = _DECISION_PROMPT.format_messages(
+            question="q", answer_language=_ANSWER_LANGUAGE,
+            retry_allowed="yes", evidence="e",
         )
+        final = _FINAL_ANSWER_PROMPT.format_messages(
+            question="q", answer_language=_ANSWER_LANGUAGE, evidence="e",
+        )
+        for messages in (decision, final):
+            system = messages[0].content
+            human = messages[1].content
+            self.assertIn("LANGUAGE RULE", system)
+            self.assertIn("language of the Original question", system)
+            self.assertIn("language of the Original question", human)
+
+    def test_unique_queries_assign_unique_ids_across_rounds(self):
+        from retrieval.agent import _unique_queries
+        from retrieval.models import SearchQuery
+        first = _unique_queries([
+            SearchQuery(id="a", query="one"),
+            SearchQuery(id="b", query="two"),
+        ])
+        self.assertEqual([item.id for item in first], ["q1", "q2"])
+        second = _unique_queries([SearchQuery(id="c", query="three")], first)
+        self.assertEqual([item.id for item in second], ["q3"])
         self.assertEqual(
-            _answer_language("How does money move?"),
-            "the same language as the original question",
+            _unique_queries([SearchQuery(id="d", query="ONE")], first), []
         )
 
     async def test_answers_with_valid_citation_in_one_round(self):
@@ -217,7 +266,8 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         query = SearchQuery(id="main", query="supported fact")
         planner = self.Chain(QueryPlan(queries=[query]))
         decider = self.Chain(AgentDecision(
-            action="answer", answer="The fact is supported [p3:c4].", citations=["p3:c4"]
+            action="answer", answer="The fact is supported [p3:c4].", citations=["p3:c4"],
+            reason="", queries=[],
         ))
         result = await RagAgent(self.Retriever([[self.hit()]]), planner, decider).answer("Question?")
         self.assertTrue(result.sufficient)
@@ -231,7 +281,8 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         query = SearchQuery(id="main", query="supported fact")
         planner = self.Chain(QueryPlan(queries=[query]))
         decider = self.Chain(AgentDecision(
-            action="answer", answer="The fact is supported [p3:c4].", citations=[]
+            action="answer", answer="The fact is supported [p3:c4].", citations=[],
+            reason="", queries=[],
         ))
         result = await RagAgent(self.Retriever([[self.hit()]]), planner, decider).answer("Question?")
         self.assertTrue(result.sufficient)
@@ -244,12 +295,14 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         retry = SearchQuery(id="retry", query="other cross-border payment methods")
         planner = self.Chain(QueryPlan(queries=[first]))
         decider = self.Chain(
-            AgentDecision(action="search_more", reason="look for other methods", queries=[retry]),
+            AgentDecision(action="search_more", reason="look for other methods",
+                          queries=[retry], answer="", citations=[]),
             AgentDecision(
                 action="answer",
                 answer=("The archive supports stablecoins as one method [p3:c4], "
                         "but does not establish a complete list."),
                 citations=["p3:c4"],
+                reason="", queries=[],
             ),
         )
         retriever = self.Retriever([[self.hit("first")], [self.hit("retry")]])
@@ -263,7 +316,9 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         from retrieval.models import AgentDecision, GroundedAnswer, QueryPlan, SearchQuery
         query = SearchQuery(id="main", query="new cross-border payment methods")
         planner = self.Chain(QueryPlan(queries=[query]))
-        decider = self.Chain(AgentDecision(action="insufficient"))
+        decider = self.Chain(AgentDecision(
+            action="insufficient", answer="", citations=[], reason="missing", queries=[],
+        ))
         finalizer = self.Chain(GroundedAnswer(
             answer="Stablecoins are one supported method [p3:c4].",
             citations=["p3:c4"],
@@ -282,10 +337,11 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         retry = SearchQuery(id="retry", query="missing evidence")
         planner = self.Chain(QueryPlan(queries=[first]))
         decider = self.Chain(
-            AgentDecision(action="search_more", reason="missing", queries=[retry]),
+            AgentDecision(action="search_more", reason="missing", queries=[retry],
+                          answer="", citations=[]),
             AgentDecision(action="search_more", reason="still missing", queries=[
                 SearchQuery(id="third", query="forbidden third round")
-            ]),
+            ], answer="", citations=[]),
         )
         retriever = self.Retriever([[self.hit("first")], [self.hit("retry")]])
         result = await RagAgent(retriever, planner, decider).answer("Question?")
@@ -300,9 +356,52 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         query = SearchQuery(id="main", query="fact")
         planner = self.Chain(QueryPlan(queries=[query]))
         decider = self.Chain(AgentDecision(
-            action="answer", answer="Invented [p99:c99].", citations=["p99:c99"]
+            action="answer", answer="Invented [p99:c99].", citations=["p99:c99"],
+            reason="", queries=[],
         ))
         result = await RagAgent(self.Retriever([[self.hit()]]), planner, decider).answer("Question?")
         self.assertFalse(result.sufficient)
         self.assertEqual(result.sources, [])
+
+
+@unittest.skipUnless(AVAILABLE, "install requirements/rag-agent.txt for retrieval tests")
+class LlmProviderTests(unittest.TestCase):
+    def test_infers_provider_from_model_name(self):
+        from retrieval.llm import resolve_provider
+        with patch.dict("os.environ", {"RAG_PROVIDER": "", "RAG_MODEL": "gemini-3.5-flash-lite"}):
+            self.assertEqual(resolve_provider(), "gemini")
+        with patch.dict("os.environ", {"RAG_PROVIDER": "", "RAG_MODEL": "openai/gpt-oss-120b"}):
+            self.assertEqual(resolve_provider(), "groq")
+
+    def test_explicit_provider_overrides_model_name(self):
+        from retrieval.llm import resolve_provider
+        with patch.dict("os.environ", {"RAG_PROVIDER": "gemini", "RAG_MODEL": "openai/gpt-oss-120b"}):
+            self.assertEqual(resolve_provider(), "gemini")
+
+    def test_rejects_unknown_provider(self):
+        from retrieval.llm import resolve_provider
+        with patch.dict("os.environ", {"RAG_PROVIDER": "openai"}):
+            with self.assertRaises(ValueError):
+                resolve_provider()
+
+    def test_provider_defaults_and_structured_kwargs(self):
+        from retrieval.llm import (
+            PROVIDER_DEFAULT_MODELS, resolve_model, structured_output_kwargs,
+        )
+        self.assertEqual(set(PROVIDER_DEFAULT_MODELS), {"groq", "gemini"})
+        with patch.dict("os.environ", {"RAG_MODEL": ""}):
+            self.assertEqual(resolve_model("groq"), "openai/gpt-oss-120b")
+            self.assertEqual(resolve_model("gemini"), "gemini-3.5-flash-lite")
+        self.assertEqual(structured_output_kwargs("groq"),
+                         {"method": "json_schema", "strict": True})
+        self.assertEqual(structured_output_kwargs("gemini"), {"method": "json_schema"})
+
+    def test_build_requires_the_provider_api_key(self):
+        from retrieval.llm import build_chat_model
+        with patch.dict("os.environ", {"GROQ_API_KEY": ""}):
+            with self.assertRaises(ValueError):
+                build_chat_model("groq", "openai/gpt-oss-120b")
+        with patch.dict("os.environ", {"GEMINI_API_KEY": "", "GOOGLE_API_KEY": ""}):
+            with self.assertRaises(ValueError):
+                build_chat_model("gemini", "gemini-3.5-flash-lite")
 

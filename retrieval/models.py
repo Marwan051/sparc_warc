@@ -4,31 +4,39 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator
+
+
+# Groq strict-mode structured output requires every field to be present and
+# objects to forbid additional properties. Keep the LLM-facing schemas free of
+# defaults and length constraints (enforced in code instead) so constrained
+# decoding can guarantee the shape.
+_STRICT = ConfigDict(extra="forbid")
 
 
 class SearchQuery(BaseModel):
-    id: str = Field(min_length=1, max_length=80)
-    query: str = Field(min_length=1, max_length=1000)
-    purpose: str = Field(default="", max_length=500)
+    model_config = _STRICT
+    id: str
+    query: str
 
-    @field_validator("id", "query", "purpose")
+    @field_validator("id", "query")
     @classmethod
     def strip_text(cls, value: str) -> str:
         return value.strip()
 
 
 class QueryPlan(BaseModel):
-    queries: list[SearchQuery] = Field(min_length=1, max_length=3)
+    model_config = _STRICT
+    queries: list[SearchQuery]
 
 
 class AgentDecision(BaseModel):
+    model_config = _STRICT
     action: Literal["answer", "search_more", "insufficient"]
-    answer: str = ""
-    citations: list[str] = Field(default_factory=list)
-    reason: str = ""
-    missing_aspects: list[str] = Field(default_factory=list, max_length=3)
-    queries: list[SearchQuery] = Field(default_factory=list, max_length=3)
+    answer: str
+    citations: list[str]
+    reason: str
+    queries: list[SearchQuery]
 
     @field_validator("answer", "reason")
     @classmethod
@@ -37,8 +45,9 @@ class AgentDecision(BaseModel):
 
 
 class GroundedAnswer(BaseModel):
+    model_config = _STRICT
     answer: str
-    citations: list[str] = Field(default_factory=list)
+    citations: list[str]
 
     @field_validator("answer")
     @classmethod

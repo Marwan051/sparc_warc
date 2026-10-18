@@ -117,17 +117,14 @@ calling retrieval.
 
 ```json
 {
-  "action": "search",
   "queries": [
     {
       "id": "comparison",
-      "query": "differences between policy A and policy B",
-      "purpose": "Find evidence comparing the policies"
+      "query": "differences between policy A and policy B"
     },
     {
       "id": "replacement_reason",
-      "query": "why policy B replaced policy A",
-      "purpose": "Find the reason for the replacement"
+      "query": "why policy B replaced policy A"
     }
   ]
 }
@@ -138,13 +135,13 @@ After retrieval, the chatbot returns either an answer action or a targeted retry
 ```json
 {
   "action": "search_more",
+  "answer": "",
+  "citations": [],
   "reason": "The comparison is supported, but the replacement reason is missing.",
-  "missing_aspects": ["Reason policy B replaced policy A"],
   "queries": [
     {
       "id": "replacement_reason_retry",
-      "query": "stated reasons policy B replaced policy A",
-      "purpose": "Find the missing replacement rationale"
+      "query": "stated reasons policy B replaced policy A"
     }
   ]
 }

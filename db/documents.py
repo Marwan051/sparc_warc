@@ -4,7 +4,7 @@ import os
 from typing import Iterator, List, Optional
 from langchain_core.documents import Document
 
-from db.db_handler import get_connection
+from db.db_handler import get_connection, streaming_cursor
 
 FETCH_BATCH_SIZE = int(os.environ.get("RAG_FETCH_BATCH_SIZE", "1000"))
 
@@ -49,23 +49,16 @@ def iter_documents(limit: Optional[int] = None) -> Iterator[Document]:
         raise ValueError("limit must be positive")
     if FETCH_BATCH_SIZE < 1:
         raise ValueError("RAG_FETCH_BATCH_SIZE must be positive")
-    conn = get_connection()
-    try:
-        cur = conn.cursor(name="rag_loader")
-        try:
-            cur.itersize = FETCH_BATCH_SIZE
-            query = _JOIN_QUERY
-            params = ()
-            if limit is not None:
-                query = _JOIN_QUERY.rstrip().rstrip(";") + " LIMIT %s;"
-                params = (limit,)
-            cur.execute(query, params)
-            for row in cur:
-                yield _to_document(row)
-        finally:
-            cur.close()
-    finally:
-        conn.close()
+    with streaming_cursor("rag_loader", itersize=FETCH_BATCH_SIZE,
+                          connection_factory=get_connection) as cur:
+        query = _JOIN_QUERY
+        params = ()
+        if limit is not None:
+            query = _JOIN_QUERY.rstrip().rstrip(";") + " LIMIT %s;"
+            params = (limit,)
+        cur.execute(query, params)
+        for row in cur:
+            yield _to_document(row)
 
 
 def load_documents_distributed(limit: Optional[int] = None) -> List[Document]:

@@ -17,6 +17,7 @@ from embeddings.embeddings import generate_embeddings, model_version
 from retrieval.models import SearchQuery, Source
 from retrieval.ranking import rerank_query_groups
 from retrieval.reranker import OnnxReranker
+from jobs.validation import env_int
 
 
 @dataclass(frozen=True)
@@ -30,18 +31,18 @@ class RetrievalConfig:
 
     @classmethod
     def from_environment(cls) -> RetrievalConfig:
-        max_length = _positive_int("EMBEDDING_MAX_LENGTH", 256)
-        candidate_k=_positive_int("RERANKER_CANDIDATE_K", 20)
-        top_k = _positive_int("TOP_K", 5)
+        max_length = env_int("EMBEDDING_MAX_LENGTH", 256, minimum=1)
+        candidate_k = env_int("RERANKER_CANDIDATE_K", 20, minimum=1)
+        top_k = env_int("TOP_K", 5, minimum=1)
         if candidate_k < top_k:
             raise ValueError("Number of candidates can not be less than the top candidates to get")
         return cls(
             chunking_version=os.environ.get("CHUNKING_VERSION", CHUNKING_VERSION),
             embedding_model=os.environ.get("EMBEDDING_MODEL", "BAAI/bge-m3-int8"),
             embedding_version=os.environ.get("EMBEDDING_VERSION") or model_version(max_length),
-            top_k=_positive_int("TOP_K", 5),
-            candidate_k=_positive_int("RERANKER_CANDIDATE_K",20),
-            max_concurrent_searches=_positive_int("RAG_DB_CONCURRENCY", 3),
+            top_k=top_k,
+            candidate_k=candidate_k,
+            max_concurrent_searches=env_int("RAG_DB_CONCURRENCY", 3, minimum=1),
         )
 
 
@@ -79,17 +80,6 @@ WHERE e.chunking_version = %s
 ORDER BY e.embedding <=> %s::vector, e.page_id, e.chunk_index
 LIMIT %s
 """
-
-
-def _positive_int(name: str, default: int) -> int:
-    raw = os.environ.get(name, str(default))
-    try:
-        value = int(raw)
-    except ValueError as error:
-        raise ValueError(f"{name} must be an integer, got {raw!r}") from error
-    if value < 1:
-        raise ValueError(f"{name} must be positive")
-    return value
 
 
 class VectorRetriever:

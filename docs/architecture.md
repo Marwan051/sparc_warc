@@ -142,6 +142,19 @@ be invoked from another directory.
   ingestion retains its own task allocation and transactional wave scheduling.
   The three shell launchers share packaging through `scripts/run_processing.sh`.
 
+Shared integer validators live in `jobs.validation` and have no optional dependencies.
+Use `integer` for named configuration values, `env_int` for environment defaults,
+and `positive_int` as an argparse argument type. `jobs.runtime` retains the
+`env_int` and `positive` imports for compatibility.
+
+The three post-ingestion coordinators use `processing_session` to own their
+database lock and Spark lifecycle. Stage modules retain transforms, commits,
+reports, and quota handling. `batch_tasks` constructs tasks lazily through a
+stage-specific factory; `check_result_size` enforces serialized result bounds.
+Database streaming readers use `db.db_handler.streaming_cursor`, which owns a
+separate read connection so writer commits cannot invalidate a named cursor.
+Close partially consumed readers explicitly to release their cursor and connection.
+
 Create `retrieval/` when indexing, search, or ranking code is added. Keep backend
 adapters with that feature and compose stages at their entry points. Package
 imports should not open connections, load models, or run jobs.

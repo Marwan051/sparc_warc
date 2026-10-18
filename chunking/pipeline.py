@@ -3,9 +3,8 @@
 import hashlib
 from contextlib import closing
 from db import chunks
-from db.db_handler import init_db
-from jobs.batching import batches, run_waves, serialized_size
-from jobs.runtime import config, start_spark, report, cli
+from jobs.batching import batch_tasks, run_waves, check_result_size
+from jobs.runtime import config, processing_session, report, cli
 
 
 def process_batch(task):
@@ -25,8 +24,8 @@ def process_batch(task):
                          "text_hash": hashlib.sha256(chunk.page_content.encode()).hexdigest(),
                          "eligible": reason is None, "filter_reason": reason})
         result["documents"].append({"page_id": source["page_id"], "source_hash": chunks.source_hash(source), "chunks": rows})
-        if serialized_size(result) > task["result_bytes"]:
-            raise ValueError("chunk result exceeds byte limit; reduce --items-per-task or increase --result-bytes")
+        check_result_size(result, task["result_bytes"],
+                          "chunk result exceeds byte limit; reduce --items-per-task or increase --result-bytes")
     return result
 
 
@@ -35,28 +34,18 @@ def run(argv=None):
     if cfg["dry_run"]:
         report(cfg)
         return 0
-    init_db()
-    conn = chunks.acquire_lock("chunking")
-    spark = None
-    try:
-        spark = start_spark("chunk", cfg)
+    with processing_session("chunk", cfg) as (conn, spark):
         def commit(result):
             for document in result["documents"]:
                 chunks.commit_document(conn, cfg["chunking_version"], document)
             report({"committed_documents": len(result["documents"]),
                     "committed_chunks": sum(len(d["chunks"]) for d in result["documents"])})
         with closing(chunks.iter_pending_documents(conn, cfg["chunking_version"], cfg["document_limit"])) as source:
-            tasks = ({"items": batch, "result_bytes": cfg["result_bytes"]}
-                     for batch in batches(source, cfg["items_per_task"], cfg["input_bytes"]))
+            tasks = batch_tasks(source, cfg, lambda batch: {
+                "items": batch, "result_bytes": cfg["result_bytes"]})
             run_waves(spark, tasks, process_batch, commit, cfg["parallel_tasks"])
         report(chunks.counts(conn, cfg["chunking_version"]))
         return 0
-    finally:
-        try:
-            if spark is not None:
-                spark.stop()
-        finally:
-            conn.close()
 
 
 def main():

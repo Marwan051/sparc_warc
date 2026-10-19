@@ -4,7 +4,8 @@ The pipeline separates parallel article processing from transactional database
 writes. Spark workers download, extract, and classify; the driver schedules work
 and owns all PostgreSQL writes.
 
-[Usage and configuration](../README.md) · [Validation results](validation.md)
+[Usage and configuration](../README.md) · [Validation results](validation.md) ·
+[Module map](module_map.md) · [Workflows](workflows.md)
 
 ## Data flow
 
@@ -113,6 +114,92 @@ and Spark-jar fingerprints select reusable archives on HDFS; temporary uploads a
 renamed into place. Code is packaged each launch. Local archives and packaging workspaces live in
 `.build-tmp/`. Shared archives are retained until
 manual maintenance removes unused versions.
+
+## Module interaction graph
+
+Solid edges are direct module-level imports; dashed edges are imports that do not
+load another module at import time (**lazy** = inside a function, **worker-lazy** =
+inside the Spark worker so the driver never loads it, **type-only** = under
+`TYPE_CHECKING`). Exact signatures for every node are in the
+[module map](module_map.md).
+
+```mermaid
+flowchart TD
+    subgraph Entry["scripts/ — entry points"]
+        INGEST["ingest.py"] --> ING
+        CHUNKS["chunk.py"] --> CH
+        TAG["tag.py"] --> TG
+        EMBED["embed.py"] --> EM
+        ASK["ask.py"] --> RET
+    end
+
+    subgraph Drivers["Spark drivers"]
+        ING["ingestion.pipeline"]
+        CH["chunking.pipeline"]
+        TG["tagging.pipeline"]
+        EM["embeddings.pipeline"]
+    end
+
+    subgraph Workers["Worker transforms"]
+        WAR["ingestion.warc"]
+        EXT["ingestion.extraction"] --> TXT["ingestion.text"]
+        PRE["chunking.preprocessing"]
+        SPL["chunking.splitters"]
+        BE["tagging.backends"] --> CON["tagging.contracts"]
+        EMBE["embeddings.embeddings"]
+    end
+
+    subgraph DB["db/ — persistence (driver-only writes)"]
+        H["db_handler"]
+        DOC["documents (orphaned)"]
+        CK["chunks"]
+        AN["analyses"]
+        EV["embeddings store"]
+        SCH["enrichment/vector schemas"]
+    end
+
+    subgraph Jobs["jobs/ — shared runtime"]
+        RT["runtime"]
+        BAT["batching"]
+        VAL["validation"]
+    end
+
+    subgraph Retrieval["retrieval/ — RAG layer"]
+        ST["store (VectorRetriever)"]
+        RAN["ranking"]
+        RR["reranker"]
+        AG["agent (RagAgent)"]
+        LM["llm"]
+        MD["models"]
+        EV2["evidence"]
+    end
+
+    ING --> WAR & EXT
+    ING --> H & RT & BAT
+    CH --> CK & RT & BAT
+    CH -.worker-lazy.-> PRE & SPL
+    TG --> AN & RT & BAT & CON
+    TG -.worker-lazy.-> BE
+    EM --> EV & RT & BAT
+    EM -.worker-lazy.-> EMBE
+
+    RT --> VAL
+    RT -.lazy.-> CK & H
+    H -.lazy.-> SCH
+    DOC & CK & AN & EV --> H
+
+    ST --> H & EMBE & RAN & RR & MD
+    RAN -.type-only.-> ST & RR
+    AG --> ST & EV2 & LM & MD
+    RET["retrieval/__init__ (answer)"] --> AG
+```
+
+The lazy edges marked above are load-bearing import cycles: `jobs.runtime` reaches
+into `db.chunks`, `db.db_handler`, and `chunking` inside functions while the stage
+pipelines import `jobs.runtime` at module level (`jobs.launch_config` has the same
+arrangement with `ingestion.pipeline`). Hoisting those imports would break module
+loading. `db/documents.py` is not imported by any app code and `query_service/` is
+an empty placeholder.
 
 ## Module boundaries
 

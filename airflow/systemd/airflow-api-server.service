@@ -1,0 +1,32 @@
+[Unit]
+Description=Airflow API server
+After=network-online.target postgresql.service postgresql@18-main.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=spark-master
+Group=spark-master
+Environment=HOME=/home/spark-master
+Environment=AIRFLOW_HOME=/home/spark-master/airflow
+Environment=PATH=/home/spark-master/airflow-venv/bin:/opt/spark/bin:/opt/hadoop/bin:/usr/local/bin:/usr/bin:/bin
+Environment=SPARK_HOME=/opt/spark
+Environment=HADOOP_HOME=/opt/hadoop
+Environment=HADOOP_CONF_DIR=/opt/hadoop/etc/hadoop
+Environment=JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
+Environment=USER=spark-master
+Environment=HDFS_APPS_DIR=/user/spark-master/apps/spark
+Environment=PYTHONUNBUFFERED=1
+Environment=NO_PROGRESS=1
+Environment=TZ=UTC
+EnvironmentFile=/home/spark-master/airflow/airflow.env
+ExecStart=/home/spark-master/airflow-venv/bin/airflow api-server
+Restart=on-failure
+RestartSec=10
+KillSignal=SIGTERM
+TimeoutStopSec=300
+LimitNOFILE=65536
+UMask=0002
+
+[Install]
+WantedBy=multi-user.target

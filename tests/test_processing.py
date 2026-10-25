@@ -148,7 +148,7 @@ class PersistenceTests(unittest.TestCase):
         with self.admin.cursor() as cur:
             cur.execute('CREATE SCHEMA ' + self.schema)
         def connect():
-            return psycopg2.connect(os.environ['WARC_TEST_DSN'], options='-c search_path='+self.schema)
+            return psycopg2.connect(os.environ['WARC_TEST_DSN'], options='-c search_path='+self.schema+',public')
         self.connect = connect
         self.patches = [patch.object(module,'get_connection',side_effect=connect) for module in (db_handler,chunks,analyses)]
         for item in self.patches: item.start()

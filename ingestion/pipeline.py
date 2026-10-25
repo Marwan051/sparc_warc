@@ -157,6 +157,22 @@ def _transient(error):
     return isinstance(error, (socket.timeout, TimeoutError, ConnectionError, urllib.error.URLError, OSError))
 
 
+def _cc_endpoint_alive(file_url):
+    """Cheap ranged probe: is data.commoncrawl.org serving this object again?"""
+    request = urllib.request.Request(
+        file_url,
+        headers={"User-Agent": "spark-warc/2", "Range": "bytes=0-4095"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return 200 <= getattr(response, "status", 200) < 400
+    except urllib.error.HTTPError as error:
+        # 4xx still means the server itself is responding.
+        return error.code < 500
+    except Exception:
+        return False
+
+
 def fetch_manifest(config):
     url = (
         f"https://data.commoncrawl.org/crawl-data/CC-NEWS/"
@@ -193,14 +209,28 @@ def _candidate(record, fields, language, file_url):
         "url": record.get("url", "").replace("\x00", ""),
         "file_url": file_url,
         "warc_date": record.get("warc_date"),
+        "canonical_url": fields.get("canonical_url"),
+        "canonical_key": fields.get("canonical_key"),
+        "text_hash": hashlib.sha256(text.encode("utf-8", "ignore")).hexdigest(),
         "title": str(fields.get("title") or "N/A").replace("\x00", ""),
         "author": str(fields.get("author") or "N/A").replace("\x00", ""),
+        "author_names": fields.get("author_names") or [],
         "published_date": str(fields.get("published_date") or "N/A").replace("\x00", ""),
+        "published_at": fields.get("published_at"),
+        "modified_at": fields.get("modified_at"),
+        "description": fields.get("description"),
+        "publisher": fields.get("publisher"),
+        "in_language": fields.get("in_language"),
+        "section": fields.get("section"),
+        "keywords": fields.get("keywords") or [],
+        "tags": fields.get("tags") or [],
         "cleaned_text": text,
         "word_count": fields.get("word_count", 0),
         "char_count": fields.get("char_count", len(text)),
         "links_count": fields.get("links_count", 0),
         "headings": fields.get("headings_sample", []),
+        "html_meta": fields.get("html_meta") or {},
+        "html_size_bytes": fields.get("html_size_bytes"),
         "language": language,
         "arabic_dialect": None,
         "extraction": fields.get("extraction", "selectolax"),
@@ -533,13 +563,35 @@ def run_streaming_pipeline(argv=None):
         print(f"Resume command: RESUME_RUN_ID={run_id} ./scripts/run_ingestion.sh")
         wave = 0
         invocation = uuid.uuid4().hex
+        # Consecutive waves that produced zero commits AND had failed results
+        # (-- tolerate a flaky CommonCrawl endpoint: a transient per-file error
+        # such as HTTP 503 no longer aborts the whole invocation; a sustained
+        # outage where every file errors still exits after 3 blank waves.
+        blank_failed_waves = 0
+        # Times this invocation has recycled failed files back to pending when
+        # allocation starved (see the not-tasks branch below). Bounded so a
+        # persistently broken endpoint still ends the invocation.
+        recycles = 0
         while True:
             run = load_run(run_id, conn=lock_conn)
             files = load_run_files(run_id, conn=lock_conn)
             reached = run["target_articles"] and run["inserted_count"] >= run["target_articles"]
             tasks = [] if reached else _allocate_tasks(config, run, files, f"{invocation}:{wave}")
             if not tasks:
-                failed = any(f["status"] == "failed" for f in files)
+                failed_files = [f for f in files if f["status"] == "failed"]
+                if (
+                    not reached
+                    and failed_files
+                    and recycles < 4
+                    and _cc_endpoint_alive(failed_files[0]["file_url"])
+                ):
+                    # Files failed earlier by transient endpoint errors (e.g.
+                    # HTTP 503) get another pass inside this invocation instead
+                    # of parking until the next resume.
+                    resume_run(run_id, conn=lock_conn)
+                    recycles += 1
+                    continue
+                failed = bool(failed_files)
                 status = "failed" if failed else ("complete" if reached or not run["target_articles"] else "shortfall")
                 finish_run(run_id, status, conn=lock_conn)
                 _summary(run_id, config, lock_conn)
@@ -583,10 +635,14 @@ def run_streaming_pipeline(argv=None):
                     bar.refresh()
                 else:
                     print(wave_msg)
-            if failed:
-                finish_run(run_id, "failed", conn=lock_conn)
-                _summary(run_id, config, lock_conn)
-                return 1
+            if failed and wave_inserted == 0:
+                blank_failed_waves += 1
+                if blank_failed_waves >= 3:
+                    finish_run(run_id, "failed", conn=lock_conn)
+                    _summary(run_id, config, lock_conn)
+                    return 1
+            else:
+                blank_failed_waves = 0
     except Exception:
         if run_id and not lock_conn.closed:
             try:

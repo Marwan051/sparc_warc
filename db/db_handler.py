@@ -77,6 +77,8 @@ def _cursor(conn):
 
 @connection_scope
 def init_db(conn=None):
+    if conn is None:
+        raise RuntimeError("Connection to db is None.")
     """Apply additive, backwards-compatible schema migrations."""
     ddl = """
     CREATE TABLE IF NOT EXISTS websites (
@@ -90,12 +92,20 @@ def init_db(conn=None):
         website_id INT REFERENCES websites(id) ON DELETE CASCADE,
         author_id INT REFERENCES authors(id) ON DELETE SET NULL,
         warc_record_id TEXT UNIQUE, url TEXT NOT NULL,
+        canonical_url TEXT, canonical_key TEXT, text_hash TEXT,
+        duplicate_of INT REFERENCES pages(id) ON DELETE SET NULL,
+        duplicate_reason TEXT,
         source_file_url TEXT, warc_date TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE IF NOT EXISTS metadata (
         page_id INT PRIMARY KEY REFERENCES pages(id) ON DELETE CASCADE,
-        title TEXT, published_date TEXT, language TEXT, arabic_dialect TEXT,
+        title TEXT, published_date TEXT,
+        published_at TIMESTAMPTZ, modified_at TIMESTAMPTZ,
+        description TEXT, publisher TEXT, in_language TEXT,
+        section TEXT, language TEXT, arabic_dialect TEXT,
+        keywords TEXT[], tags TEXT[], author_names TEXT[],
         word_count INT, char_count INT, links_count INT, headings JSONB,
+        html_meta JSONB, html_size_bytes INT,
         extraction_method TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE IF NOT EXISTS content (
         page_id INT PRIMARY KEY REFERENCES pages(id) ON DELETE CASCADE,
@@ -136,6 +146,9 @@ def init_db(conn=None):
     CREATE INDEX IF NOT EXISTS idx_ingest_files_manifest ON ingest_files (manifest_id);
     CREATE INDEX IF NOT EXISTS idx_ingest_run_files_sched
         ON ingest_run_files (run_id, status, ordinal);
+    CREATE INDEX IF NOT EXISTS idx_pages_canonical_key ON pages (canonical_key);
+    CREATE INDEX IF NOT EXISTS idx_pages_text_hash ON pages (text_hash);
+    CREATE INDEX IF NOT EXISTS idx_pages_live ON pages (id) WHERE duplicate_of IS NULL;
     ALTER TABLE ingest_files ADD COLUMN IF NOT EXISTS checkpoint_version INT NOT NULL DEFAULT 1;
     ALTER TABLE ingest_files ADD COLUMN IF NOT EXISTS etag TEXT;
     ALTER TABLE ingest_files ADD COLUMN IF NOT EXISTS last_modified TEXT;
@@ -272,21 +285,30 @@ def _insert_new_records(cur, records):
         cur.execute("SELECT name,id FROM authors WHERE name=ANY(%s)", (authors,))
         author_ids = dict(cur.fetchall())
     rows = [(domain_ids[extract_domain(r["url"])], author_ids.get(r.get("author", "").strip()),
-             r["record_id"], r["url"], r.get("file_url"), r.get("warc_date")) for r in records]
+             r["record_id"], r["url"], r.get("canonical_url"), r.get("canonical_key"),
+             r.get("text_hash"), r.get("file_url"), r.get("warc_date")) for r in records]
     inserted = execute_values(
         cur,
-        """INSERT INTO pages (website_id,author_id,warc_record_id,url,source_file_url,warc_date)
+        """INSERT INTO pages (website_id,author_id,warc_record_id,url,canonical_url,canonical_key,text_hash,source_file_url,warc_date)
            VALUES %s ON CONFLICT (warc_record_id) DO NOTHING RETURNING warc_record_id,id""",
         rows, fetch=True)
     page_ids = {record_id: page_id for record_id, page_id in inserted}
     new_records = [r for r in records if r["record_id"] in page_ids]
     if new_records:
         execute_values(cur, """INSERT INTO metadata
-            (page_id,title,published_date,language,arabic_dialect,word_count,char_count,links_count,headings,extraction_method)
+            (page_id,title,published_date,published_at,modified_at,description,publisher,
+             in_language,section,language,arabic_dialect,keywords,tags,author_names,
+             word_count,char_count,links_count,headings,html_meta,html_size_bytes,extraction_method)
             VALUES %s""", [(
-                page_ids[r["record_id"]], r.get("title"), r.get("published_date"), r.get("language"),
-                r.get("arabic_dialect"), r.get("word_count", 0), r.get("char_count", 0),
-                r.get("links_count", 0), json.dumps(r.get("headings", [])), r.get("extraction"),
+                page_ids[r["record_id"]], r.get("title"), r.get("published_date"),
+                r.get("published_at"), r.get("modified_at"), r.get("description"),
+                r.get("publisher"), r.get("in_language"), r.get("section"),
+                r.get("language"), r.get("arabic_dialect"),
+                r.get("keywords") or [], r.get("tags") or [], r.get("author_names") or [],
+                r.get("word_count", 0), r.get("char_count", 0),
+                r.get("links_count", 0), json.dumps(r.get("headings", [])),
+                json.dumps(r.get("html_meta") or {}, ensure_ascii=False),
+                r.get("html_size_bytes"), r.get("extraction"),
             ) for r in new_records])
         execute_values(cur, "INSERT INTO content (page_id,cleaned_text) VALUES %s",
                        [(page_ids[r["record_id"]], r["cleaned_text"]) for r in new_records])

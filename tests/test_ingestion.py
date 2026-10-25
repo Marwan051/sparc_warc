@@ -11,6 +11,7 @@ import os
 import tempfile
 import unittest
 import uuid
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 from warcio.warcwriter import WARCWriter
@@ -146,6 +147,85 @@ class UnitTests(unittest.TestCase):
         self.assertIn('élèves', fields['clean_text'])
         self.assertEqual(decode_and_validate(prose.encode('cp1252'), 'cp1252')[1], 'success')
 
+    def test_canonical_jsonld_and_meta_enrichment(self):
+        prose = 'The council approved the budget after a long debate. ' * 30
+        jsonld = {
+            '@context': 'https://schema.org',
+            '@graph': [
+                {'@type': 'BreadcrumbList', 'author': {'name': 'Navigation'}},
+                {
+                    '@type': 'NewsArticle', 'headline': 'Budget passes',
+                    'author': [{'@type': 'Person', 'name': 'Jane Doe'}, {'name': 'John Roe'}],
+                    'publisher': {'@type': 'Organization', 'name': 'Daily News'},
+                    'datePublished': '2026-05-01T08:00:00Z',
+                    'dateModified': '2026-05-02T09:00:00Z',
+                    'inLanguage': 'en-US', 'articleSection': 'Politics',
+                    'keywords': ['budget', 'taxes'], 'description': 'LD summary',
+                },
+            ],
+        }
+        html = (
+            '<html lang="en-US"><head><title>Budget story | Daily</title>'
+            '<link rel="canonical" href="https://www.Example.com/news/budget/?utm_source=feed&amp;b=2&amp;a=1#comments">'
+            '<meta name="description" content="A short summary of the budget story.">'
+            '<meta property="article:section" content="World">'
+            '<meta name="keywords" content="budget, council; taxes">'
+            '<meta property="article:tag" content="local">'
+            '<meta property="article:modified_time" content="2026-05-02T10:00:00Z">'
+            '<script type="application/ld+json">' + json.dumps(jsonld) + '</script>'
+            '</head><body><h1>Budget</h1><p>' + prose + '</p></body></html>'
+        ).encode()
+        fields = extract_html_fields(
+            dict(raw_bytes=html, url='https://example.com/news/budget/', warc_date=None), 10, False
+        )
+        self.assertEqual(fields['canonical_url'],
+                         'https://www.Example.com/news/budget/?utm_source=feed&b=2&a=1')
+        self.assertEqual(fields['canonical_key'], 'https://example.com/news/budget?a=1&b=2')
+        self.assertEqual(fields['author'], 'Jane Doe')
+        self.assertEqual(fields['author_names'], ['Jane Doe', 'John Roe'])
+        self.assertEqual(fields['publisher'], 'Daily News')
+        self.assertEqual(fields['section'], 'World')
+        self.assertEqual(fields['in_language'], 'en')
+        self.assertEqual(fields['keywords'], ['budget', 'council', 'taxes'])
+        self.assertEqual(fields['tags'], ['local'])
+        self.assertEqual(fields['published_at'].isoformat(), '2026-05-01T08:00:00+00:00')
+        self.assertEqual(fields['modified_at'].isoformat(), '2026-05-02T10:00:00+00:00')
+        self.assertIn('meta', fields['html_meta'])
+        self.assertIn('jsonld', fields['html_meta'])
+        self.assertGreater(fields['html_size_bytes'], 0)
+        self.assertEqual(fields['headings_sample'], ['Budget'])
+
+    def test_canonical_relative_and_invalid_fallback(self):
+        prose = 'Residents discussed the proposal in detail. ' * 30
+        html = ('<html><head><link rel="canonical" href="/story/1"></head><body>' + prose + '</body></html>').encode()
+        fields = extract_html_fields(dict(raw_bytes=html, url='https://news.example.com/a/b', warc_date=None), 5, False)
+        self.assertEqual(fields['canonical_url'], 'https://news.example.com/story/1')
+        self.assertEqual(fields['canonical_key'], 'https://news.example.com/story/1')
+
+        html = ('<html><head><link rel="canonical" href="javascript:void(0)"></head><body>' + prose + '</body></html>').encode()
+        fields = extract_html_fields(dict(raw_bytes=html, url='https://news.example.com/a/b', warc_date=None), 5, False)
+        self.assertIsNone(fields['canonical_url'])
+        self.assertEqual(fields['canonical_key'], 'https://news.example.com/a/b')
+
+    def test_html_meta_payload_is_bounded(self):
+        prose = 'Residents discussed the proposal in detail. ' * 30
+        metas = ''.join('<meta name="k%s" content="%s">' % (i, 'x' * 2000) for i in range(60))
+        html = ('<html><head>' + metas + '</head><body>' + prose + '</body></html>').encode()
+        fields = extract_html_fields(dict(raw_bytes=html, url='https://example.com/a', warc_date=None), 5, False)
+        self.assertLessEqual(len(json.dumps(fields['html_meta'], ensure_ascii=False).encode('utf-8')), 32 * 1024)
+
+    def test_candidate_carries_enrichment_and_text_hash(self):
+        fields = dict(clean_text='Some article text', title='T', author='A', published_date='N/A',
+                      canonical_url='https://example.com/a', canonical_key='https://example.com/a',
+                      description='d', keywords=['k'], tags=['t'], author_names=['A'],
+                      html_meta={'meta': {}}, html_size_bytes=123)
+        item = job._candidate({'url': 'https://example.com/a', 'warc_date': None, 'record_id': 'r1'},
+                              fields, 'en', 'file-1')
+        self.assertEqual(len(item['text_hash']), 64)
+        self.assertEqual(item['canonical_key'], 'https://example.com/a')
+        self.assertEqual(item['keywords'], ['k'])
+        self.assertEqual(item['html_size_bytes'], 123)
+
     def test_extracted_cp1256_mojibake_is_rejected(self):
         mojibake = ('à²µà²¿à²œà²¯à³Œ à²®à²¤ à²µà²¿à²­à²œà²¨à³†. ' * 20).strip()
         html = ('<html><body>' + ('Valid page chrome. ' * 100) + '</body></html>').encode()
@@ -267,7 +347,7 @@ class DatabaseTests(unittest.TestCase):
         with self.admin.cursor() as cur:
             cur.execute('CREATE SCHEMA ' + self.schema)
         def connect():
-            return psycopg2.connect(self.dsn, options='-c search_path='+self.schema)
+            return psycopg2.connect(self.dsn, options='-c search_path=' + self.schema + ',public')
         self.connect = connect
         self.patch = patch.object(db, 'get_connection', side_effect=connect)
         self.patch.start()
@@ -294,6 +374,38 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(db.commit_chunk(self.run_id, last), 1)
         self.assertEqual(db.load_run(self.run_id)['inserted_count'], 3)
         self.assertEqual(db.load_run_files(self.run_id)[0]['status'], 'quota_reached')
+
+    def test_enrichment_columns_round_trip(self):
+        enriched = candidate(
+            'enriched', canonical_url='https://example.com/news',
+            canonical_key='https://example.com/news', text_hash='a' * 64,
+            published_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            modified_at=datetime(2026, 5, 2, tzinfo=timezone.utc),
+            description='desc', publisher='Pub', in_language='en', section='World',
+            keywords=['a', 'b'], tags=['t'], author_names=['Jane', 'John'],
+            html_meta={'meta': {'description': ['d']}}, html_size_bytes=1000,
+        )
+        self.assertEqual(db.commit_chunk(self.run_id, chunk([enriched])), 1)
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute("""SELECT pages.canonical_key,pages.text_hash,metadata.description,
+                                  metadata.publisher,metadata.in_language,metadata.section,
+                                  metadata.keywords,metadata.tags,metadata.author_names,
+                                  metadata.html_meta,metadata.html_size_bytes,metadata.published_at
+                           FROM pages JOIN metadata ON metadata.page_id=pages.id
+                           WHERE pages.warc_record_id='enriched'""")
+            row = cur.fetchone()
+        self.assertEqual(row[0], 'https://example.com/news')
+        self.assertEqual(row[1], 'a' * 64)
+        self.assertEqual(row[2], 'desc')
+        self.assertEqual(row[3], 'Pub')
+        self.assertEqual(row[4], 'en')
+        self.assertEqual(row[5], 'World')
+        self.assertEqual(row[6], ['a', 'b'])
+        self.assertEqual(row[7], ['t'])
+        self.assertEqual(row[8], ['Jane', 'John'])
+        self.assertEqual(row[9], {'meta': {'description': ['d']}})
+        self.assertEqual(row[10], 1000)
+        self.assertEqual(row[11].astimezone(timezone.utc).isoformat(), '2026-05-01T00:00:00+00:00')
 
     def test_batch_duplicate_ids(self):
         result = chunk([candidate('a'), candidate('a')])

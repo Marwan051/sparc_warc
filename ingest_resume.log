@@ -1,0 +1,226 @@
+WARNING: Using incubator modules: jdk.incubator.vector
+26/10/21 14:46:15 WARN NativeCodeLoader: Unable to load native-hadoop library for your platform... using builtin-java classes where applicable
+Resuming run bf82b942-58f5-4210-8f97-52a9a466c908: 2981 committed
+articles: 2981 articles [00:00, ? articles/s]Resume command: RESUME_RUN_ID=bf82b942-58f5-4210-8f97-52a9a466c908 ./scripts/run_ingestion.sh
+Using Spark's default log4j profile: org/apache/spark/log4j2-defaults.properties
+26/10/21 14:46:16 INFO SparkContext: Running Spark version 4.2.0
+26/10/21 14:46:16 INFO SparkContext: OS info Linux, 6.12.107+deb13-amd64, amd64
+26/10/21 14:46:16 INFO SparkContext: Java version 21.0.12.1+1-1-deb13u1-Debian
+26/10/21 14:46:16 INFO ResourceUtils: ==============================================================
+26/10/21 14:46:16 INFO ResourceUtils: No custom resources configured for spark.driver.
+26/10/21 14:46:16 INFO ResourceUtils: ==============================================================
+26/10/21 14:46:16 INFO SparkContext: Submitted application: CC-NEWS-Bounded-Ingest
+26/10/21 14:46:16 INFO SecurityManager: Changing view acls to: spark-master
+26/10/21 14:46:16 INFO SecurityManager: Changing modify acls to: spark-master
+26/10/21 14:46:16 INFO SecurityManager: Changing view acls groups to: spark-master
+26/10/21 14:46:16 INFO SecurityManager: Changing modify acls groups to: spark-master
+26/10/21 14:46:16 INFO SecurityManager: SecurityManager: authentication disabled; ui acls disabled; users with view permissions: spark-master groups with view permissions: EMPTY; users with modify permissions: spark-master; groups with modify permissions: EMPTY; RPC SSL disabled
+26/10/21 14:46:17 INFO Utils: Successfully started service 'sparkDriver' on port 33329.
+26/10/21 14:46:17 INFO SparkEnv: Registering MapOutputTracker
+26/10/21 14:46:17 INFO SparkEnv: Registering BlockManagerMaster
+26/10/21 14:46:17 INFO BlockManagerMasterEndpoint: Using org.apache.spark.storage.DefaultTopologyMapper for getting topology information
+26/10/21 14:46:17 INFO BlockManagerMasterEndpoint: BlockManagerMasterEndpoint up
+26/10/21 14:46:17 INFO SparkEnv: Registering BlockManagerMasterHeartbeat
+26/10/21 14:46:17 INFO DiskBlockManager: Created local directory at /tmp/blockmgr-87b3e6cf-157f-4911-b9c9-60f040fbc5ab
+26/10/21 14:46:17 INFO SparkEnv: Registering OutputCommitCoordinator
+26/10/21 14:46:17 INFO JettyUtils: Start Jetty 0.0.0.0:4040 for SparkUI
+26/10/21 14:46:17 INFO Utils: Successfully started service 'SparkUI' on port 4040.
+26/10/21 14:46:17 INFO ResourceProfile: Default ResourceProfile created, executor resources: Map(memoryOverhead -> name: memoryOverhead, amount: 512, script: , vendor: , cores -> name: cores, amount: 1, script: , vendor: , memory -> name: memory, amount: 512, script: , vendor: , offHeap -> name: offHeap, amount: 0, script: , vendor: ), task resources: Map(cpus -> name: cpus, amount: 1.0)
+26/10/21 14:46:17 INFO ResourceProfile: Limiting resource is cpus at 1 tasks per executor
+26/10/21 14:46:17 INFO ResourceProfileManager: Added ResourceProfile id: 0
+26/10/21 14:46:17 INFO SecurityManager: Changing view acls to: spark-master
+26/10/21 14:46:17 INFO SecurityManager: Changing modify acls to: spark-master
+26/10/21 14:46:17 INFO SecurityManager: Changing view acls groups to: spark-master
+26/10/21 14:46:17 INFO SecurityManager: Changing modify acls groups to: spark-master
+26/10/21 14:46:17 INFO SecurityManager: SecurityManager: authentication disabled; ui acls disabled; users with view permissions: spark-master groups with view permissions: EMPTY; users with modify permissions: spark-master; groups with modify permissions: EMPTY; RPC SSL disabled
+26/10/21 14:46:17 INFO DefaultNoHARMFailoverProxyProvider: Connecting to ResourceManager at spark-master/192.168.56.10:8032
+26/10/21 14:46:17 INFO Configuration: resource-types.xml not found
+26/10/21 14:46:17 INFO ResourceUtils: Unable to find 'resource-types.xml'.
+26/10/21 14:46:17 INFO Client: Verifying our application has not requested more than the maximum memory capability of the cluster (1536 MB per container)
+26/10/21 14:46:17 INFO Client: Will allocate AM container, with 896 MB memory including 384 MB overhead
+26/10/21 14:46:17 INFO Client: Setting up container launch context for our AM
+26/10/21 14:46:17 INFO Client: Setting up the launch environment for our AM container
+26/10/21 14:46:17 INFO Client: Preparing resources for our AM container
+26/10/21 14:46:17 INFO Client: Source and destination file systems are the same. Not copying hdfs:/user/spark-master/apps/spark/spark-libs-d977abce2f2e8fc62d10676719f39aa61f6da227d8dbe002f95250a61a2017bc.zip
+26/10/21 14:46:17 INFO Client: Source and destination file systems are the same. Not copying hdfs://spark-master:9000/user/spark-master/apps/spark/pyspark_venv-f93284f8b8e25324aae9bc8bf6ceed7d218a1ccb0c5edb1c4a3ef1456c6fc79a.tar.gz#environment
+26/10/21 14:46:17 INFO Client: Uploading resource file:/opt/spark-4.2.0-bin-hadoop3/python/lib/pyspark.zip -> hdfs://spark-master:9000/user/spark-master/.sparkStaging/application_1792580908546_0003/pyspark.zip
+26/10/21 14:46:18 INFO Client: Uploading resource file:/opt/spark-4.2.0-bin-hadoop3/python/lib/py4j-0.10.9.9-src.zip -> hdfs://spark-master:9000/user/spark-master/.sparkStaging/application_1792580908546_0003/py4j-0.10.9.9-src.zip
+26/10/21 14:46:18 INFO Client: Uploading resource file:/home/spark-master/rag_news_project/spark_warc_v2/.build-tmp/pack-0qOmFs/project_code.zip -> hdfs://spark-master:9000/user/spark-master/.sparkStaging/application_1792580908546_0003/project_code.zip
+26/10/21 14:46:18 INFO Client: Uploading resource file:/tmp/spark-7f8ff9f0-1c0a-443e-ae91-804b2d706989/__spark_conf__13566532391689656229.zip -> hdfs://spark-master:9000/user/spark-master/.sparkStaging/application_1792580908546_0003/__spark_conf__.zip
+26/10/21 14:46:18 INFO SecurityManager: Changing view acls to: spark-master
+26/10/21 14:46:18 INFO SecurityManager: Changing modify acls to: spark-master
+26/10/21 14:46:18 INFO SecurityManager: Changing view acls groups to: spark-master
+26/10/21 14:46:18 INFO SecurityManager: Changing modify acls groups to: spark-master
+26/10/21 14:46:18 INFO SecurityManager: SecurityManager: authentication disabled; ui acls disabled; users with view permissions: spark-master groups with view permissions: EMPTY; users with modify permissions: spark-master; groups with modify permissions: EMPTY; RPC SSL disabled
+26/10/21 14:46:18 INFO Client: Submitting application application_1792580908546_0003 to ResourceManager
+26/10/21 14:46:18 INFO YarnClientImpl: Submitted application application_1792580908546_0003
+26/10/21 14:46:19 INFO Client: Application report for application_1792580908546_0003 (state: ACCEPTED)
+26/10/21 14:46:19 INFO Client: 
+	 client token: N/A
+	 diagnostics: AM container is launched, waiting for AM container to Register with RM
+	 ApplicationMaster host: N/A
+	 ApplicationMaster RPC port: -1
+	 queue: root.default
+	 start time: 1792583178660
+	 final status: UNDEFINED
+	 tracking URL: http://spark-master:8088/proxy/application_1792580908546_0003/
+	 user: spark-master
+26/10/21 14:46:22 INFO YarnClientSchedulerBackend: Add WebUI Filter. org.apache.spark.deploy.yarn.AmIpFilter, Map(PROXY_HOSTS -> spark-master, PROXY_URI_BASES -> http://spark-master:8088/proxy/application_1792580908546_0003), /proxy/application_1792580908546_0003
+26/10/21 14:46:22 INFO YarnSchedulerBackend$YarnSchedulerEndpoint: ApplicationMaster registered as NettyRpcEndpointRef(spark-client://YarnAM)
+26/10/21 14:46:22 INFO Client: Application report for application_1792580908546_0003 (state: RUNNING)
+26/10/21 14:46:22 INFO Client: 
+	 client token: N/A
+	 diagnostics: N/A
+	 ApplicationMaster host: 172.16.148.135
+	 ApplicationMaster RPC port: -1
+	 queue: root.default
+	 start time: 1792583178660
+	 final status: UNDEFINED
+	 tracking URL: http://spark-master:8088/proxy/application_1792580908546_0003/
+	 user: spark-master
+26/10/21 14:46:22 INFO YarnClientSchedulerBackend: Application application_1792580908546_0003 has started running.
+26/10/21 14:46:22 INFO Utils: Successfully started service 'org.apache.spark.network.netty.NettyBlockTransferService' on port 42027.
+26/10/21 14:46:22 INFO NettyBlockTransferService: Server created on spark-master:42027
+26/10/21 14:46:22 INFO BlockManager: Using org.apache.spark.storage.RandomBlockReplicationPolicy for block replication policy
+26/10/21 14:46:22 INFO BlockManagerMaster: Registering BlockManager BlockManagerId(driver, spark-master, 42027, None)
+26/10/21 14:46:22 INFO BlockManagerMasterEndpoint: Registering block manager spark-master:42027 with 127.2 MiB RAM, BlockManagerId(driver, spark-master, 42027, None)
+26/10/21 14:46:22 INFO BlockManagerMaster: Registered BlockManager BlockManagerId(driver, spark-master, 42027, None)
+26/10/21 14:46:22 INFO BlockManager: Initialized BlockManager: BlockManagerId(driver, spark-master, 42027, None)
+26/10/21 14:46:23 INFO RollingEventLogFilesWriter: Logging events to hdfs:/spark-logs/eventlog_v2_application_1792580908546_0003/events_1_application_1792580908546_0003.zstd
+26/10/21 14:46:23 INFO ServerInfo: Adding filter to /jobs: org.apache.spark.deploy.yarn.AmIpFilter
+26/10/21 14:46:23 INFO ServerInfo: Adding filter to /jobs/json: org.apache.spark.deploy.yarn.AmIpFilter
+26/10/21 14:46:23 INFO ServerInfo: Adding filter to /jobs/job: org.apache.spark.deploy.yarn.AmIpFilter
+26/10/21 14:46:23 INFO ServerInfo: Adding filter to /jobs/job/json: org.apache.spark.deploy.yarn.AmIpFilter
+26/10/21 14:46:23 INFO ServerInfo: Adding filter to /stages: org.apache.spark.deploy.yarn.AmIpFilter
+26/10/21 14:46:23 INFO ServerInfo: Adding filter to /stages/json: org.apache.spark.deploy.yarn.AmIpFilter
+26/10/21 14:46:23 INFO ServerInfo: Adding filter to /stages/stage: org.apache.spark.deploy.yarn.AmIpFilter
+26/10/21 14:46:23 INFO ServerInfo: Adding filter to /stages/stage/json: org.apache.spark.deploy.yarn.AmIpFilter
+26/10/21 14:46:23 INFO ServerInfo: Adding filter to /stages/pool: org.apache.spark.deploy.yarn.AmIpFilter
+26/10/21 14:46:23 INFO ServerInfo: Adding filter to /stages/pool/json: org.apache.spark.deploy.yarn.AmIpFilter
+26/10/21 14:46:23 INFO ServerInfo: Adding filter to /stages/taskThreadDump: org.apache.spark.deploy.yarn.AmIpFilter
+26/10/21 14:46:23 INFO ServerInfo: Adding filter to /stages/taskThreadDump/json: org.apache.spark.deploy.yarn.AmIpFilter
+26/10/21 14:46:23 INFO ServerInfo: Adding filter to /storage: org.apache.spark.deploy.yarn.AmIpFilter
+26/10/21 14:46:23 INFO ServerInfo: Adding filter to /storage/json: org.apache.spark.deploy.yarn.AmIpFilter
+26/10/21 14:46:23 INFO ServerInfo: Adding filter to /storage/rdd: org.apache.spark.deploy.yarn.AmIpFilter
+26/10/21 14:46:23 INFO ServerInfo: Adding filter to /storage/rdd/json: org.apache.spark.deploy.yarn.AmIpFilter
+26/10/21 14:46:23 INFO ServerInfo: Adding filter to /environment: org.apache.spark.deploy.yarn.AmIpFilter
+26/10/21 14:46:23 INFO ServerInfo: Adding filter to /environment/json: org.apache.spark.deploy.yarn.AmIpFilter
+26/10/21 14:46:23 INFO ServerInfo: Adding filter to /executors: org.apache.spark.deploy.yarn.AmIpFilter
+26/10/21 14:46:23 INFO ServerInfo: Adding filter to /executors/json: org.apache.spark.deploy.yarn.AmIpFilter
+26/10/21 14:46:23 INFO ServerInfo: Adding filter to /executors/threadDump: org.apache.spark.deploy.yarn.AmIpFilter
+26/10/21 14:46:23 INFO ServerInfo: Adding filter to /executors/threadDump/json: org.apache.spark.deploy.yarn.AmIpFilter
+26/10/21 14:46:23 INFO ServerInfo: Adding filter to /executors/heapHistogram: org.apache.spark.deploy.yarn.AmIpFilter
+26/10/21 14:46:23 INFO ServerInfo: Adding filter to /executors/heapHistogram/json: org.apache.spark.deploy.yarn.AmIpFilter
+26/10/21 14:46:23 INFO ServerInfo: Adding filter to /static: org.apache.spark.deploy.yarn.AmIpFilter
+26/10/21 14:46:24 INFO ServerInfo: Adding filter to /: org.apache.spark.deploy.yarn.AmIpFilter
+26/10/21 14:46:24 INFO ServerInfo: Adding filter to /api: org.apache.spark.deploy.yarn.AmIpFilter
+26/10/21 14:46:24 INFO ServerInfo: Adding filter to /metrics: org.apache.spark.deploy.yarn.AmIpFilter
+26/10/21 14:46:24 INFO ServerInfo: Adding filter to /jobs/job/kill: org.apache.spark.deploy.yarn.AmIpFilter
+26/10/21 14:46:24 INFO ServerInfo: Adding filter to /stages/stage/kill: org.apache.spark.deploy.yarn.AmIpFilter
+26/10/21 14:46:24 INFO ServerInfo: Adding filter to /metrics/json: org.apache.spark.deploy.yarn.AmIpFilter
+26/10/21 14:46:26 INFO YarnSchedulerBackend$YarnDriverEndpoint: Registered executor NettyRpcEndpointRef(spark-client://Executor) (192.168.56.13:56086) with ID 1, ResourceProfileId 0
+26/10/21 14:46:26 INFO YarnSchedulerBackend$YarnDriverEndpoint: Registered executor NettyRpcEndpointRef(spark-client://Executor) (192.168.56.12:60248) with ID 2, ResourceProfileId 0
+26/10/21 14:46:26 INFO BlockManagerMasterEndpoint: Registering block manager worker3:35573 with 127.2 MiB RAM, BlockManagerId(1, worker3, 35573, None)
+26/10/21 14:46:27 INFO BlockManagerMasterEndpoint: Registering block manager worker2:45033 with 127.2 MiB RAM, BlockManagerId(2, worker2, 45033, None)
+26/10/21 14:46:47 INFO YarnClientSchedulerBackend: SchedulerBackend is ready for scheduling beginning after waiting maxRegisteredResourcesWaitingTime: 30000.0(ms)
+articles: 3281 articles [01:18,  3.82 articles/s]                                                 Wave 1: committed 3,281/unlimited; new=300; worker peak RSS MiB=[220.5, 215.4, 224.6]
+articles: 3281 articles [01:18,  3.82 articles/s, wave=1, pending_files=357, rss_mib=[220.5, 215.4, 224.6]]articles: 3281 articles [01:18,  3.82 articles/s, wave=1, pending_files=357, rss_mib=[220.5, 215.4, 224.6]]articles: 3581 articles [01:50,  5.87 articles/s, wave=1, pending_files=357, rss_mib=[220.5, 215.4, 224.6]]                                                                                                           Wave 2: committed 3,581/unlimited; new=300; worker peak RSS MiB=[228.0, 215.4, 228.0]
+articles: 3581 articles [01:50,  5.87 articles/s, wave=2, pending_files=357, rss_mib=[228.0, 215.4, 228.0]]articles: 3581 articles [01:50,  5.87 articles/s, wave=2, pending_files=357, rss_mib=[228.0, 215.4, 228.0]]articles: 3881 articles [02:28,  6.63 articles/s, wave=2, pending_files=357, rss_mib=[228.0, 215.4, 228.0]]                                                                                                           Wave 3: committed 3,881/unlimited; new=300; worker peak RSS MiB=[229.3, 228.0, 228.0]
+articles: 3881 articles [02:28,  6.63 articles/s, wave=3, pending_files=357, rss_mib=[229.3, 228.0, 228.0]]articles: 3881 articles [02:28,  6.63 articles/s, wave=3, pending_files=357, rss_mib=[229.3, 228.0, 228.0]]articles: 4181 articles [03:08,  6.99 articles/s, wave=3, pending_files=357, rss_mib=[229.3, 228.0, 228.0]]                                                                                                           Wave 4: committed 4,181/unlimited; new=300; worker peak RSS MiB=[228.0, 247.5, 247.5]
+articles: 4181 articles [03:08,  6.99 articles/s, wave=4, pending_files=357, rss_mib=[228.0, 247.5, 247.5]]articles: 4181 articles [03:08,  6.99 articles/s, wave=4, pending_files=357, rss_mib=[228.0, 247.5, 247.5]]ERROR:root:Exception while sending command.
+Traceback (most recent call last):
+  File "/opt/spark/python/lib/py4j-0.10.9.9-src.zip/py4j/clientserver.py", line 535, in send_command
+    answer = smart_decode(self.stream.readline()[:-1])
+                          ~~~~~~~~~~~~~~~~~~~~^^
+RuntimeError: reentrant call inside <_io.BufferedReader name=8>
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/opt/spark/python/lib/py4j-0.10.9.9-src.zip/py4j/java_gateway.py", line 1038, in send_command
+    response = connection.send_command(command)
+  File "/opt/spark/python/lib/py4j-0.10.9.9-src.zip/py4j/clientserver.py", line 566, in send_command
+    raise Py4JNetworkError(
+        "Error while sending or receiving", e, proto.ERROR_ON_RECEIVE)
+py4j.protocol.Py4JNetworkError: Error while sending or receiving
+ERROR:root:KeyboardInterrupt while sending command.
+Traceback (most recent call last):
+  File "/opt/spark/python/lib/pyspark.zip/pyspark/core/context.py", line 408, in signal_handler
+    self.cancelAllJobs()
+    ~~~~~~~~~~~~~~~~~~^^
+  File "/opt/spark/python/lib/pyspark.zip/pyspark/core/context.py", line 2507, in cancelAllJobs
+    self._jsc.sc().cancelAllJobs()
+    ~~~~~~~~~~~~^^
+  File "/opt/spark/python/lib/py4j-0.10.9.9-src.zip/py4j/java_gateway.py", line 1362, in __call__
+    return_value = get_return_value(
+        answer, self.gateway_client, self.target_id, self.name)
+  File "/opt/spark/python/lib/pyspark.zip/pyspark/errors/exceptions/captured.py", line 251, in deco
+    return f(*a, **kw)
+  File "/opt/spark/python/lib/py4j-0.10.9.9-src.zip/py4j/protocol.py", line 335, in get_return_value
+    raise Py4JError(
+        "An error occurred while calling {0}{1}{2}".
+        format(target_id, ".", name))
+py4j.protocol.Py4JError: An error occurred while calling o43.sc
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/opt/spark/python/lib/py4j-0.10.9.9-src.zip/py4j/java_gateway.py", line 1038, in send_command
+    response = connection.send_command(command)
+  File "/opt/spark/python/lib/py4j-0.10.9.9-src.zip/py4j/clientserver.py", line 535, in send_command
+    answer = smart_decode(self.stream.readline()[:-1])
+                          ~~~~~~~~~~~~~~~~~~~~^^
+  File "/usr/lib/python3.13/socket.py", line 719, in readinto
+    return self._sock.recv_into(b)
+           ~~~~~~~~~~~~~~~~~~~~^^^
+  File "/opt/spark/python/lib/pyspark.zip/pyspark/core/context.py", line 410, in signal_handler
+    raise KeyboardInterrupt()
+KeyboardInterrupt
+articles: 4181 articles [03:17,  6.06 articles/s, wave=4, pending_files=357, rss_mib=[228.0, 247.5, 247.5]]
+Traceback (most recent call last):
+  File "/opt/spark/python/lib/pyspark.zip/pyspark/core/context.py", line 408, in signal_handler
+    self.cancelAllJobs()
+    ~~~~~~~~~~~~~~~~~~^^
+  File "/opt/spark/python/lib/pyspark.zip/pyspark/core/context.py", line 2507, in cancelAllJobs
+    self._jsc.sc().cancelAllJobs()
+    ~~~~~~~~~~~~^^
+  File "/opt/spark/python/lib/py4j-0.10.9.9-src.zip/py4j/java_gateway.py", line 1362, in __call__
+    return_value = get_return_value(
+        answer, self.gateway_client, self.target_id, self.name)
+  File "/opt/spark/python/lib/pyspark.zip/pyspark/errors/exceptions/captured.py", line 251, in deco
+    return f(*a, **kw)
+  File "/opt/spark/python/lib/py4j-0.10.9.9-src.zip/py4j/protocol.py", line 335, in get_return_value
+    raise Py4JError(
+        "An error occurred while calling {0}{1}{2}".
+        format(target_id, ".", name))
+py4j.protocol.Py4JError: An error occurred while calling o43.sc
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/spark-master/rag_news_project/spark_warc_v2/scripts/ingest.py", line 6, in <module>
+    main()
+    ~~~~^^
+  File "/home/spark-master/rag_news_project/spark_warc_v2/.build-tmp/pack-0qOmFs/project_code.zip/ingestion/pipeline.py", line 624, in main
+    sys.exit(run_streaming_pipeline(sys.argv[1:]))
+             ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "/home/spark-master/rag_news_project/spark_warc_v2/.build-tmp/pack-0qOmFs/project_code.zip/ingestion/pipeline.py", line 565, in run_streaming_pipeline
+    results = execute_batch(spark, tasks, process_file_chunk)
+  File "/home/spark-master/rag_news_project/spark_warc_v2/.build-tmp/pack-0qOmFs/project_code.zip/jobs/batching.py", line 87, in execute_batch
+    return spark.sparkContext.parallelize(tasks, len(tasks)).map(worker).collect()
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/opt/spark/python/lib/pyspark.zip/pyspark/core/rdd.py", line 1699, in collect
+    sock_info = self.ctx._jvm.PythonRDD.collectAndServe(self._jrdd.rdd())
+  File "/opt/spark/python/lib/py4j-0.10.9.9-src.zip/py4j/java_gateway.py", line 1361, in __call__
+    answer = self.gateway_client.send_command(command)
+  File "/opt/spark/python/lib/py4j-0.10.9.9-src.zip/py4j/java_gateway.py", line 1038, in send_command
+    response = connection.send_command(command)
+  File "/opt/spark/python/lib/py4j-0.10.9.9-src.zip/py4j/clientserver.py", line 535, in send_command
+    answer = smart_decode(self.stream.readline()[:-1])
+                          ~~~~~~~~~~~~~~~~~~~~^^
+  File "/usr/lib/python3.13/socket.py", line 719, in readinto
+    return self._sock.recv_into(b)
+           ~~~~~~~~~~~~~~~~~~~~^^^
+  File "/opt/spark/python/lib/pyspark.zip/pyspark/core/context.py", line 410, in signal_handler
+    raise KeyboardInterrupt()
+KeyboardInterrupt

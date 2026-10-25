@@ -142,7 +142,9 @@ fi
     --driver-memory "$DRIVER_MEMORY" \
     --executor-memory "$EXECUTOR_MEMORY" \
     --conf "spark.executor.memoryOverhead=$EXECUTOR_MEMORY_OVERHEAD" \
-    --conf spark.executor.cores=1 \
+    --conf "spark.executor.cores=${SPARK_EXECUTOR_CORES:-1}" \
+    --conf "spark.yarn.am.memory=${SPARK_YARN_AM_MEMORY:-512m}" \
+    --conf "spark.yarn.am.memoryOverhead=${SPARK_YARN_AM_MEMORY_OVERHEAD:-384m}" \
     --conf "spark.executor.instances=$SPARK_EXECUTOR_INSTANCES" \
     --conf spark.dynamicAllocation.enabled=false \
     --conf spark.driver.maxResultSize=64m \

@@ -6,7 +6,8 @@ counts only newly committed articles toward your requested quotas.
 
 [Architecture](docs/architecture.md) · [Module map](docs/module_map.md) ·
 [Workflows](docs/workflows.md) · [Validation results](docs/validation.md) ·
-[RAG API plan](docs/rag-api-plan.md)
+[RAG API plan](docs/rag-api-plan.md) ·
+[Airflow migration plan](docs/airflow-migration.md)
 
 For parallel post-ingestion processing, use the independent
 [Spark processing jobs](docs/processing.md):

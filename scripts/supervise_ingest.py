@@ -33,7 +33,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-RUN_ID = "bf82b942-58f5-4210-8f97-52a9a466c908"
+MANIFEST_ID = "2026/09"  # supervisor tracks the manifest, not a fixed run id
+YEAR, MONTH = MANIFEST_ID.split("/")
 FALLBACK_URL = "https://data.commoncrawl.org/crawl-data/CC-NEWS/2026/05/CC-NEWS-20260530125241-08095.warc.gz"
 REPO = Path("~/rag_news_project/spark_warc_v2").expanduser()
 PIDFILE = Path("~/supervise_ingest.pid").expanduser()
@@ -86,7 +87,8 @@ def file_counts(env: dict[str, str]) -> tuple[int, int]:
     """(total, eof) for the run's manifest files."""
     row = db_query(
         "SELECT count(*), count(*) FILTER (WHERE status='eof') "
-        f"FROM ingest_run_files WHERE run_id='{RUN_ID}';", env)
+        "FROM ingest_run_files WHERE run_id IN "
+        f"(SELECT run_id FROM ingest_runs WHERE manifest_id='{MANIFEST_ID}');", env)
     if not row or "|" not in row:
         return (0, 0)
     total, done = row.split("|")
@@ -140,13 +142,14 @@ def spawn_run(env: dict[str, str]) -> None:
     cmd = (
         f"export PATH=/opt/hadoop/bin:/opt/spark/bin:$PATH && cd {REPO} && "
         f"SPARK_EXECUTOR_INSTANCES=5 ./scripts/run_processing.sh ingest --progress "
-        f"--resume-run-id {RUN_ID} --max-files-per-round 5 --num-files all"
+        f"--max-files-per-round 5 --num-files all"
     )
     with WAVE_LOG.open("ab") as handle:
         subprocess.Popen(
             ["bash", "-lc", cmd],
             stdin=subprocess.DEVNULL, stdout=handle, stderr=handle,
-            start_new_session=True, env={**os.environ, **env},
+            start_new_session=True,
+            env={**os.environ, **env, "YEAR": YEAR, "MONTH": MONTH, "NUM_FILES": "all"},
         )
     log("relaunched ingest invocation")
 
@@ -189,7 +192,7 @@ def cmd_start(interval: int) -> int:
 
     signal.signal(signal.SIGTERM, _terminate)
     signal.signal(signal.SIGINT, _terminate)
-    log(f"watching run {RUN_ID} every {interval}s")
+    log(f"watching manifest {MANIFEST_ID} every {interval}s")
     env = load_env()
     while not stopping["flag"]:
         total, done = file_counts(env)
@@ -273,7 +276,8 @@ def cmd_status() -> int:
     env = load_env()
     total, done = file_counts(env)
     rows = db_query(
-        f"SELECT inserted_count FROM ingest_runs WHERE run_id='{RUN_ID}';", env)
+        "SELECT coalesce(sum(inserted_count),0) FROM ingest_runs "
+        f"WHERE manifest_id='{MANIFEST_ID}';", env)
     print(f"files: {done}/{total} eof; articles committed: {rows or '?'}", flush=True)
     return 0
 

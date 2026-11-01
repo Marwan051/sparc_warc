@@ -350,6 +350,14 @@ def tick(env: dict[str, str], state: dict) -> None:
                 f"(+{articles - prev} since last, {rate:.1f}/s), supervisor {sup_alive}")
 
     # 2) supervisor down -> alert once/hour + restart
+    #    but never restart one that just completed its run (it exits
+    #    immediately on RUN COMPLETE -> futile relaunch loop)
+    if not sup_alive and eof and eof == total:
+        if now - alerts.get("run_complete", 0) > COOLDOWN_S:
+            alerts["run_complete"] = now
+            tg_send(f"watchdog: ingest run complete ({eof}/{total} eof); "
+                    "supervisor exited by design - not restarting.")
+        return
     if not sup_alive:
         if now - alerts.get("sup_down", 0) > COOLDOWN_S:
             alerts["sup_down"] = now

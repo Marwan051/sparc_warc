@@ -4,8 +4,9 @@ Independent YARN jobs materialize chunks, analyze eligible chunks, and embed
 eligible chunks. They default to one concurrent Spark task per requested executor. PostgreSQL reads and writes stay
 on the driver; executors receive bounded payloads and do not need DB credentials.
 
-All four stages (ingestion, chunking, tagging, embedding) use the Python launcher
-`python -m jobs.launcher <stage>` for packaging and YARN submission. Spark startup
+All four stages (ingestion, chunking, tagging, embedding) use `jobs.launcher` for
+packaging and YARN submission. Run it from the command line with
+`python -m jobs.launcher <stage>`, or import `launch()` from Python. Spark startup
 and task submission live in `jobs/runtime.py` and `jobs/batching.py`. Ingestion
 retains its original Spark retry settings, one-partition-per-file wave, ordered
 commits, quotas, and recovery logic; chunking, tagging, and embedding use
@@ -75,6 +76,38 @@ store and cluster administrators can access executor environments.
 
 `--dry-run` validates arguments without opening Spark, PostgreSQL, or a provider
 connection and without packaging. All stages support `--help`.
+
+### Python API
+
+Import `launch()` to run a stage from a Python script or task function:
+
+```python
+from jobs.launcher import launch
+
+launch("ingest", num_files=1, max_accepted_articles=10, dry_run=True)
+```
+
+The first argument is the stage (`"ingest"`, `"chunk"`, `"tag"`, or `"embed"`).
+Keyword options are the same settings accepted by that stage's CLI, with hyphens
+written as underscores. The launcher applies the stage's existing validation and
+configuration defaults. Options set through the environment or project `.env`
+continue to work as they do for the CLI.
+
+| Stage | Keyword options |
+|---|---|
+| `ingest` | `year`, `month`, `num_files`, `resume_run_id`, `executor_instances`, `max_accepted_articles`, `max_accepted_per_file`, `max_files_per_round`, `start_file_offset`, `worker_max_candidates`, `worker_max_result_bytes`, `worker_max_input_bytes`, `worker_max_seconds`, `max_html_bytes`, `max_article_bytes`, `min_word_count`, `max_retries`, `db_batch_size`, `lingua_min_confidence`, `use_trafilatura`, `no_progress`, `dry_run` |
+| `chunk` | `dry_run`, `executor_instances`, `chunking_version`, `parallel_tasks`, `items_per_task`, `input_bytes`, `result_bytes`, `document_limit` |
+| `tag` | `dry_run`, `executor_instances`, `chunking_version`, `parallel_tasks`, `items_per_task`, `input_bytes`, `result_bytes`, `analysis_limit`, `retry_errors`, `backend`, `model`, `analysis_version`, `export_json` |
+| `embed` | `dry_run`, `executor_instances`, `chunking_version`, `parallel_tasks`, `items_per_task`, `input_bytes`, `result_bytes`, `embedding_limit`, `model`, `max_length`, `embedding_batch_size` |
+
+Boolean options take `True` or `False`; `dry_run=True` validates and prints the
+resolved configuration without submitting a job. `no_progress=True` suppresses
+ingestion progress output. Passing `None` omits an option and lets its environment
+or default value apply. `launch()` returns `0` on success and raises
+`jobs.errors.LaunchError` on launcher or stage failure; the exception's
+`exit_code` attribute contains the corresponding CLI exit code. This lets a task
+framework such as Airflow mark a failed launch as failed and apply its retry
+policy.
 
 ## Configuration
 

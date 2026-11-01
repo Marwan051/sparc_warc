@@ -20,6 +20,22 @@ STAGES = {
     "embed": "embeddings.pipeline",
 }
 
+# These options are argparse boolean actions. Keeping the small exception map
+# here lets the Python API produce the same argv the existing CLI accepts.
+BOOLEAN_OPTIONS = {
+    "ingest": {
+        "dry_run": ("--dry-run", "--no-dry-run"),
+        "use_trafilatura": ("--use-trafilatura", "--no-use-trafilatura"),
+        "no_progress": ("--no-progress", "--progress"),
+    },
+    "chunk": {"dry_run": ("--dry-run", "--no-dry-run")},
+    "tag": {
+        "dry_run": ("--dry-run", "--no-dry-run"),
+        "retry_errors": ("--retry-errors", None),
+    },
+    "embed": {"dry_run": ("--dry-run", "--no-dry-run")},
+}
+
 
 def _exit_code(returncode):
     return 128 - returncode if returncode < 0 else returncode
@@ -129,6 +145,34 @@ def child_environment(settings, exported_keys):
     return environ
 
 
+def _options_to_arguments(stage, options):
+    """Convert Python keyword options to the stage's existing CLI arguments."""
+    if stage not in STAGES:
+        raise LaunchError("", 2)
+
+    arguments = []
+    for name, value in options.items():
+        if not name or not name.replace("_", "").isalnum() or name[0].isdigit():
+            raise ValueError(f"invalid launcher option name: {name!r}")
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            if name not in BOOLEAN_OPTIONS[stage]:
+                raise TypeError(f"{name} is not a boolean launcher option")
+            enabled, disabled = BOOLEAN_OPTIONS[stage][name]
+            flag = enabled if value else disabled
+            if flag is not None:
+                arguments.append(flag)
+            continue
+        if not isinstance(value, (str, int, float)):
+            raise TypeError(
+                f"{name} must be a string, number, boolean, or None; "
+                f"got {type(value).__name__}"
+            )
+        arguments.extend(("--" + name.replace("_", "-"), str(value)))
+    return arguments
+
+
 def run(arguments):
     # Record what the caller supplied before .env adds defaults; resume
     # validation treats these names as explicit overrides.
@@ -229,9 +273,9 @@ def run(arguments):
         shutil.rmtree(task_tmp, ignore_errors=True)
 
 
-def main(argv=None):
+def _call(arguments):
+    """Apply the same error-to-exit-code behavior for API and CLI callers."""
     os.chdir(PROJECT_ROOT)
-    arguments = list(sys.argv[1:] if argv is None else argv)
     try:
         return run(arguments)
     except LaunchError as error:
@@ -243,6 +287,27 @@ def main(argv=None):
     except Exception as error:  # Keep unexpected failures to one clear line.
         print(f"FATAL {type(error).__name__}: {error}", file=sys.stderr)
         return 1
+
+
+def launch(stage, **options):
+    """Launch one Spark stage using Python keyword options.
+
+    Option names use Python identifiers corresponding to the stage's CLI flags,
+    for example ``launch("ingest", dry_run=True, num_files=1)``. Return 0 on
+    success and raise ``LaunchError`` when setup or the stage fails, so task
+    frameworks such as Airflow mark the call as failed.
+    """
+    stage_arguments = _options_to_arguments(stage, options)
+    os.chdir(PROJECT_ROOT)
+    result = run([stage, *stage_arguments])
+    if result:
+        raise LaunchError(f"{stage} launcher exited with code {result}", result)
+    return 0
+
+
+def main(argv=None):
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    return _call(arguments)
 
 
 if __name__ == "__main__":

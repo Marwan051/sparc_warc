@@ -35,11 +35,13 @@ placeholder packages. Package initializers stay lightweight so ingestion does no
 require optional RAG dependencies. See the
 [module boundaries](docs/architecture.md#module-boundaries) for extension guidance.
 
-Every Spark stage starts with `python -m jobs.launcher <stage>`; inspection and
-export use `python -m db.inspect` and `python -m scripts.export_csv`. Import
-loading and splitting helpers come directly from `db.documents` and
-`chunking.splitters`. `scripts/ingest.py` is the entry point passed to Spark by
-the launcher.
+Start Spark stages with `python -m jobs.launcher <stage>` or call
+`jobs.launcher.launch(stage, **options)` from Python. See the
+[Python launcher API](docs/processing.md#python-api) for supported options and
+failure behavior. Inspection and export use `python -m db.inspect` and
+`python -m scripts.export_csv`. Import loading and splitting helpers come
+directly from `db.documents` and `chunking.splitters`. `scripts/ingest.py` is the
+entry point passed to Spark by the launcher.
 
 The existing `db/db_handler.py` path is retained; the former `extractors`,
 `parsers`, and `utils` implementations now live together under `ingestion/`.

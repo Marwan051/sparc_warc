@@ -28,4 +28,4 @@ print('PACKAGING_OK '+json.dumps({'archive':archive,'arguments':args[:8]}))
     env = dict(os.environ, PATH=str(temporary)+':'+os.environ['PATH'], USE_HDFS_CACHE='0',
                PACKAGE_TEST_TMP=str(build), VENV_DIR=str(root/'.venv'))
     env.pop('DRY_RUN', None)
-    subprocess.run(['bash',str(root/'scripts/run_ingestion.sh')],cwd=root,env=env,check=True)
+    subprocess.run([sys.executable,'-m','jobs.launcher','ingest'],cwd=root,env=env,check=True)

@@ -1,6 +1,7 @@
 import importlib.util
 import os
 import json
+import sys
 import tempfile
 import uuid
 import subprocess
@@ -74,8 +75,11 @@ class BatchTests(unittest.TestCase):
 
     def test_cli_limits_and_dry_launcher(self):
         self.assertEqual(config('tag', ['--analysis-limit','7'])['analysis_limit'], 7)
-        for script in ('run_chunking.sh','run_tagging.sh'):
-            result = subprocess.run(['bash', 'scripts/'+script, '--dry-run'], text=True, capture_output=True)
+        for stage in ('chunk','tag'):
+            result = subprocess.run(
+                [sys.executable, '-m', 'jobs.launcher', stage, '--dry-run'],
+                text=True, capture_output=True,
+            )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn('"dry_run": true', result.stdout)
 

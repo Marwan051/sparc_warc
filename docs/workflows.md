@@ -29,7 +29,7 @@ flowchart LR
     PAGES --> CHP["chunking (Spark)"] --> CK
     CK --> TGP["tagging (Spark, LLM backend)"] --> ANLY
     CK --> EMP["embeddings (Spark, BGE-M3 ONNX)"] --> VEC
-    PAGES --> EXP["export_csv.sh"] --> CSV["exports/ CSVs"]
+    PAGES --> EXP["python -m scripts.export_csv"] --> CSV["exports/ CSVs"]
     CK & VEC --> QA["retrieval (local Python)"] --> ANS["scripts/ask.py answer"]
 ```
 
@@ -277,11 +277,11 @@ no silent cosine-only fallback.
 
 ```mermaid
 flowchart TD
-    U["user: ./scripts/run_ingestion.sh --flag..."] --> E["jobs/environment.main\nload .env → os.execvpe into launcher\n(records SPARK_WARC_EXPORTED_ENV_KEYS)"]
-    E --> L["run_ingestion.sh / run_processing.sh"]
-    L --> LC["jobs.launch_config.main → resolve(stage, argv)\n(executor count, memory, dry-run)"]
+    U["user: python -m jobs.launcher ingest --flag..."] --> E["jobs.launcher.main\nread .env in the bootstrap venv\n(records SPARK_WARC_EXPORTED_ENV_KEYS)"]
+    E --> L["jobs.launcher\n(stage parse, venv selection, thread env)"]
+    L --> LC["jobs.launch_config.resolve(stage, argv)\n(executor count, memory, dry-run)"]
     LC --> LC2{"dry-run?"}
-    LC2 -- yes --> OUT["print resolution table → stop"]
+    LC2 -- yes --> OUT["stage module prints resolution → stop"]
     LC2 -- no --> PK["Package python deps + project modules\n(ingestion/, db/, chunking/, tagging/, jobs/, …)\ninto .build-tmp/; env+jar fingerprints select\nreusable archives on HDFS (USE_HDFS_CACHE)"]
     PK --> SUB["spark-submit --py-files archive\nscripts/ingest.py | chunk.py | tag.py | embed.py"]
     SUB --> RT["jobs.runtime.start_spark"]
@@ -289,9 +289,8 @@ flowchart TD
     APP --> SES["processing_session: init_db → stage advisory lock\n→ SparkSession (secret redaction, executor env\nfor Groq keys / model paths)"]
 ```
 
-Applies to all four launchers: `run_ingestion.sh` uses ingestion's own scheduling;
-`run_chunking.sh` / `run_tagging.sh` / `run_embeddings.sh` share
-`run_processing.sh` and `jobs.batching.run_waves`.
+Applies to all four stages: `python -m jobs.launcher ingest` uses ingestion's own
+scheduling; `chunk`, `tag`, and `embed` share `jobs.batching.run_waves`.
 
 ---
 
@@ -299,10 +298,10 @@ Applies to all four launchers: `run_ingestion.sh` uses ingestion's own schedulin
 
 ```mermaid
 flowchart LR
-    subgraph INSPECT["inspect_db.sh → db.inspect.main"]
+    subgraph INSPECT["python -m db.inspect → db.inspect.main"]
         I1["print_counts"] & I2["print_progress"] & I3["print_previews"] --> I4["stdout tables (SAMPLE_SIZE rows per table)"]
     end
-    subgraph EXPORT["export_csv.sh"]
+    subgraph EXPORT["python -m scripts.export_csv"]
         X1["psycopg COPY of nine tables\n(pages, content, metadata, analyses,\nchunks, embeddings incl. full pgvector…)"] --> X2["exports/ (project root) + copy to /mnt/hgfs/copy_path/warcdb_csv/"]
     end
     subgraph WATCH["watch_embeddings.py"]
@@ -374,12 +373,12 @@ flowchart LR
 | § | Workflow | Entry point |
 |---|---|---|
 | 1 | End-to-end phases | — |
-| 2 | Ingestion lifecycle, worker, commit txn | `scripts/run_ingestion.sh` |
+| 2 | Ingestion lifecycle, worker, commit txn | `python -m jobs.launcher ingest` |
 | 3 | Shared wave engine | `jobs.batching.run_waves` |
-| 4 | Chunking | `scripts/run_chunking.sh` |
-| 5 | Tagging | `scripts/run_tagging.sh` |
-| 6 | Embeddings | `scripts/run_embeddings.sh` |
+| 4 | Chunking | `python -m jobs.launcher chunk` |
+| 5 | Tagging | `python -m jobs.launcher tag` |
+| 6 | Embeddings | `python -m jobs.launcher embed` |
 | 7 | RAG question flow | `scripts/ask.py` |
-| 8 | Launcher / deployment | shell launchers |
-| 9 | Operational tools | `inspect_db.sh`, `export_csv.sh`, `watch_embeddings.py`, `vector_search_test.py` |
+| 8 | Launcher / deployment | `jobs.launcher` |
+| 9 | Operational tools | `python -m db.inspect`, `python -m scripts.export_csv`, `scripts/watch_embeddings.py`, `scripts/vector_search_test.py` |
 | 10 | State machines | persisted tables |

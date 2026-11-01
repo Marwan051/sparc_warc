@@ -11,8 +11,8 @@ counts only newly committed articles toward your requested quotas.
 
 For parallel post-ingestion processing, use the independent
 [Spark processing jobs](docs/processing.md):
-`scripts/run_chunking.sh`, `scripts/run_tagging.sh`, and
-`scripts/run_embeddings.sh`. These process bounded
+`python -m jobs.launcher chunk`, `python -m jobs.launcher tag`, and
+`python -m jobs.launcher embed`. These process bounded
 batches with driver-owned PostgreSQL commits; tagging supports pluggable model
 backends.
 
@@ -35,11 +35,11 @@ placeholder packages. Package initializers stay lightweight so ingestion does no
 require optional RAG dependencies. See the
 [module boundaries](docs/architecture.md#module-boundaries) for extension guidance.
 
-All commands live in `scripts/`; the former root wrappers have been removed.
-Use `scripts/run_ingestion.sh`, `scripts/inspect_db.sh`, and
-`scripts/export_csv.sh`. Import loading and splitting helpers directly from
-`db.documents` and `chunking.splitters`. `scripts/ingest.py` is the entry point
-passed to Spark by the launcher.
+Every Spark stage starts with `python -m jobs.launcher <stage>`; inspection and
+export use `python -m db.inspect` and `python -m scripts.export_csv`. Import
+loading and splitting helpers come directly from `db.documents` and
+`chunking.splitters`. `scripts/ingest.py` is the entry point passed to Spark by
+the launcher.
 
 The existing `db/db_handler.py` path is retained; the former `extractors`,
 `parsers`, and `utils` implementations now live together under `ingestion/`.
@@ -50,7 +50,7 @@ Run ingestion on the Spark master with HDFS and YARN available. The launcher use
 three executors by default with one core each; use `--executor-instances` or `SPARK_EXECUTOR_INSTANCES`
 to choose a different fixed count per run. PostgreSQL must be reachable from the master;
 workers need matching Python versions and the interpreter path used by the packed
-virtual environment. The launcher also requires `zip`.
+virtual environment. The launcher itself uses only the Python standard library.
 
 ```bash
 python3 -m venv .venv
@@ -88,7 +88,7 @@ export PGDATABASE=warcdb PGUSER=warc_user PGPASSWORD=password
 ```
 
 Override these environment variables for another database.
-All four Spark shell launchers also load defaults from the project-root `.env`;
+All four Spark stages load defaults from the project-root `.env`;
 CLI flags override exported variables, which override `.env`. Install
 `requirements/base.txt` for the dotenv loader. The `.env` file is Git-ignored.
 
@@ -101,7 +101,7 @@ the VMs and Hadoop services; run them on the Debian host, not inside a VM.
 Request 1,000 new articles, with a maximum of 100 from each source file:
 
 ```bash
-./scripts/run_ingestion.sh --num-files all --max-accepted-articles 1000 --max-accepted-per-file 100
+python -m jobs.launcher ingest --num-files all --max-accepted-articles 1000 --max-accepted-per-file 100
 ```
 
 Duplicates, rejected articles, and unsuccessful inserts do not consume quota.
@@ -111,13 +111,13 @@ files until the total is reached or the sources are exhausted.
 For a small smoke test:
 
 ```bash
-./scripts/run_ingestion.sh --num-files 1 --max-accepted-articles 10 --max-accepted-per-file 10
+python -m jobs.launcher ingest --num-files 1 --max-accepted-articles 10 --max-accepted-per-file 10
 ```
 
 To validate configuration without submitting a job:
 
 ```bash
-./scripts/run_ingestion.sh --dry-run --max-accepted-articles 1000
+python -m jobs.launcher ingest --dry-run --max-accepted-articles 1000
 ```
 
 The final summary reports committed counts, per-file status, rejection counters,
@@ -127,7 +127,7 @@ and `2` when the selected sources cannot fulfill the target.
 ## Resume
 
 ```bash
-./scripts/run_ingestion.sh --resume-run-id <printed-run-id>
+python -m jobs.launcher ingest --resume-run-id <printed-run-id>
 ```
 
 Resume restores the original file selection, quotas, and filtering settings.
@@ -192,8 +192,8 @@ shares packaged dependencies and Spark jars under `HDFS_APPS_DIR` (default:
 After a run finishes:
 
 ```bash
-./scripts/inspect_db.sh
-./scripts/export_csv.sh
+python -m db.inspect
+python -m scripts.export_csv
 ```
 
 The export writes nine article and enrichment tables (including chunks,
@@ -201,7 +201,7 @@ analyses, and embeddings) to `exports/` under the project root and copies them
 to `/mnt/hgfs/copy_path/warcdb_csv/`. Optional arguments override both directories:
 
 ```bash
-./scripts/export_csv.sh ./exports /path/to/destination
+python -m scripts.export_csv ./exports /path/to/destination
 ```
 
 `chunk_embeddings.csv` contains the full pgvector values and can be large.

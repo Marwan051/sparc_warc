@@ -1,0 +1,74 @@
+{
+  "dry_run": {
+    "ingest": {
+      "db_batch_size": 25,
+      "executor_instances": 3,
+      "lingua_min_confidence": 0.5,
+      "manifest_id": "2026/05",
+      "max_article_bytes": 1048576,
+      "max_files_per_round": 3,
+      "max_html_bytes": 4194304,
+      "max_retries": 3,
+      "min_word_count": 80,
+      "month": "05",
+      "num_files": 15,
+      "per_file_target": 0,
+      "start_file_offset": 0,
+      "target_articles": 17,
+      "use_trafilatura": true,
+      "worker_max_candidates": 100,
+      "worker_max_input_bytes": 33554432,
+      "worker_max_result_bytes": 4194304,
+      "worker_max_seconds": 120,
+      "year": "2026"
+    },
+    "chunk": {
+      "chunking_version": "recursive-800-100-clean-v2.4.1-v1",
+      "document_limit": null,
+      "dry_run": true,
+      "executor_instances": 3,
+      "input_bytes": 2097152,
+      "items_per_task": 25,
+      "parallel_tasks": 3,
+      "result_bytes": 4194304
+    },
+    "tag": {
+      "analysis_limit": null,
+      "analysis_version": "chunk-analysis-v2.4.1",
+      "backend": "groq",
+      "chunking_version": "recursive-800-100-clean-v2.4.1-v1",
+      "dry_run": true,
+      "executor_instances": 3,
+      "export_json": null,
+      "input_bytes": 2097152,
+      "items_per_task": 10,
+      "model": "qwen/qwen3.8-27b",
+      "parallel_tasks": 3,
+      "result_bytes": 1048576,
+      "retry_errors": false
+    },
+    "embed": {
+      "chunking_version": "recursive-800-100-clean-v2.4.1-v1",
+      "dry_run": true,
+      "embedding_batch_size": 1,
+      "embedding_limit": null,
+      "executor_instances": 2,
+      "input_bytes": 2097152,
+      "items_per_task": 10,
+      "max_length": 256,
+      "model": "BAAI/bge-m3-int8",
+      "parallel_tasks": 2,
+      "result_bytes": 1048576
+    }
+  },
+  "venv_fingerprints": {
+    "ingest": "3e93d890fea27e8aef2b5fd7aeaa1e26396a085ec2a1378315e33ae3da4f80ab",
+    "chunk": "fa731176b3cba1d5cb0e5881b83c06d3ba9142c94b2240f4d17538e144fa39fe",
+    "tag": "fa731176b3cba1d5cb0e5881b83c06d3ba9142c94b2240f4d17538e144fa39fe",
+    "embed": "94b59442a7bbfa530ee331fe81dbbfd3be76d7201fb481a09f067b8f9aa78fd9"
+  },
+  "exit_codes": {
+    "missing_stage": 1,
+    "unknown_stage": 2
+  }
+}

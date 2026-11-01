@@ -2,52 +2,141 @@
 
 import os
 from pathlib import Path
-import subprocess
-import sys
+import re
 import tempfile
 import unittest
+from unittest.mock import patch
+
+from scripts import export_csv
 
 
-TABLES = ("websites", "authors", "pages", "metadata", "content",
-          "chunk_materializations", "article_chunks", "chunk_analyses", "chunk_embeddings")
+TABLES = export_csv.TABLES
+
+
+class FakeCursor:
+    def __init__(self, connection):
+        self.connection = connection
+        self.table = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exception):
+        return False
+
+    def copy_expert(self, statement, stream):
+        table = re.search(r"FROM (\w+)", statement).group(1)
+        if self.connection.fail_table == table:
+            raise RuntimeError("simulated export failure")
+        stream.write("column\n" + table + "\n")
+
+    def execute(self, statement):
+        self.table = re.search(r"FROM (\w+)", statement).group(1)
+        self.connection.statements.append(statement)
+
+    def fetchone(self):
+        return (self.connection.counts.get(self.table, 0),)
+
+
+class FakeConnection:
+    def __init__(self, fail_table=None):
+        self.fail_table = fail_table
+        self.counts = {table: 3 for table in TABLES}
+        self.statements = []
+        self.closed = False
+
+    def cursor(self):
+        return FakeCursor(self)
+
+    def close(self):
+        self.closed = True
 
 
 class ExportCsvTests(unittest.TestCase):
-    def test_exports_enrichment_tables_and_preserves_old_files_on_failure(self):
-        script = Path(__file__).resolve().parents[1] / "scripts/export_csv.sh"
+    def test_exports_enrichment_tables_and_copies_them(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            bin_dir = root / "bin"
-            bin_dir.mkdir()
-            fake_psql = bin_dir / "psql"
-            fake_psql.write_text(f"#!{sys.executable}\n" + '''
-import os, re, sys
-sql = sys.argv[sys.argv.index('-c') + 1]
-match = re.search(r'FROM (\\w+)', sql)
-table = match.group(1)
-if os.environ.get('EXPORT_FAIL_TABLE') == table:
-    sys.exit(1)
-if sql.startswith('COPY '):
-    print('column')
-    print(table)
-else:
-    print('1')
-''')
-            fake_psql.chmod(0o755)
-            csv_dir = root / "export's csv dir"
-            dest_dir = root / "destination"
-            env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ["PATH"],
-                       PGPASSWORD="test")
-            command = ["bash", str(script), str(csv_dir), str(dest_dir)]
-            result = subprocess.run(command, env=env, text=True, capture_output=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            for table in TABLES:
-                self.assertEqual((csv_dir / f"{table}.csv").read_text(), f"column\n{table}\n")
-                self.assertEqual((dest_dir / f"{table}.csv").read_text(), f"column\n{table}\n")
+            csv_dir = root / "exports"
+            dest_dir = root / "share"
+            connection = FakeConnection()
+            calls = []
 
-            (csv_dir / "websites.csv").write_text("existing export\n")
-            env["EXPORT_FAIL_TABLE"] = "chunk_embeddings"
-            failed = subprocess.run(command, env=env, text=True, capture_output=True)
-            self.assertNotEqual(failed.returncode, 0)
-            self.assertEqual((csv_dir / "websites.csv").read_text(), "existing export\n")
-            self.assertFalse(list(csv_dir.glob(".export-*")))
+            def connect(**settings):
+                calls.append(settings)
+                return connection
+
+            with patch.dict(os.environ, {
+                "PGHOST": "db.internal",
+                "PGPORT": "6000",
+                "PGDATABASE": "news",
+                "PGUSER": "exporter",
+                "PGPASSWORD": "super-secret",
+            }, clear=False):
+                code = export_csv.main([str(csv_dir), str(dest_dir)], connect=connect)
+
+            self.assertEqual(code, 0)
+            self.assertTrue(connection.closed)
+            self.assertEqual(calls[0]["host"], "db.internal")
+            self.assertEqual(calls[0]["port"], "6000")
+            self.assertEqual(calls[0]["dbname"], "news")
+            self.assertEqual(calls[0]["user"], "exporter")
+            self.assertEqual(calls[0]["password"], "super-secret")
+
+            for table in TABLES:
+                expected = "column\n" + table + "\n"
+                self.assertEqual((csv_dir / f"{table}.csv").read_text(), expected)
+                self.assertEqual((dest_dir / f"{table}.csv").read_text(), expected)
+            self.assertEqual(sorted(p.name for p in csv_dir.glob(".export-*")), [])
+            self.assertEqual(len(connection.statements), len(TABLES))
+
+    def test_failure_leaves_the_previous_export_alone(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            csv_dir = root / "exports"
+            csv_dir.mkdir()
+            previous = csv_dir / "websites.csv"
+            previous.write_text("old export\n")
+            connection = FakeConnection(fail_table="chunk_embeddings")
+
+            with patch.dict(os.environ, {}, clear=False):
+                code = export_csv.main(
+                    [str(csv_dir), str(root / "share")],
+                    connect=lambda **settings: connection,
+                )
+
+            self.assertEqual(code, 1)
+            self.assertEqual(previous.read_text(), "old export\n")
+            self.assertEqual(sorted(p.name for p in csv_dir.glob(".export-*")), [])
+            self.assertFalse((root / "share").exists())
+            self.assertTrue(connection.closed)
+
+    def test_defaults_match_the_shell_script(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            connection = FakeConnection()
+            calls = []
+
+            def connect(**settings):
+                calls.append(settings)
+                return connection
+
+            with patch.dict(os.environ, {}, clear=False):
+                for name in ("PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGPASSWORD"):
+                    os.environ.pop(name, None)
+                code = export_csv.main(
+                    [str(root / "exports"), str(root / "share")],
+                    connect=connect,
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(calls[0], {
+                "host": "localhost",
+                "port": "5432",
+                "dbname": "warcdb",
+                "user": "warc_user",
+                "password": "password",
+            })
+
+
+if __name__ == "__main__":
+    unittest.main()

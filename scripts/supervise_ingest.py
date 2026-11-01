@@ -19,7 +19,7 @@ status  : one screen of live state: supervisor PID, driver PID(s) with kill
           hints, YARN app id, and DB progress counters.
 
 Python-only on purpose (bash-free ops tooling); the only external calls are
-psql (read-only DB queries) and the project's own run_processing.sh launcher.
+psql (read-only DB queries) and the project's own Python launcher.
 """
 from __future__ import annotations
 
@@ -141,7 +141,7 @@ def spawn_run(env: dict[str, str]) -> None:
         return
     cmd = (
         f"export PATH=/opt/hadoop/bin:/opt/spark/bin:$PATH && cd {REPO} && "
-        f"SPARK_EXECUTOR_INSTANCES=5 ./scripts/run_processing.sh ingest --progress "
+        f"SPARK_EXECUTOR_INSTANCES=5 {REPO}/.venv/bin/python -m jobs.launcher ingest --progress "
         f"--max-files-per-round 5 --num-files all"
     )
     with WAVE_LOG.open("ab") as handle:

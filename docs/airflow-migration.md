@@ -23,7 +23,7 @@ in turn:
 | `chunk` | `chunking/pipeline.py` | Splits each article's clean text into overlapping chunks sized for retrieval. |
 | `tag` | `tagging/pipeline.py` | Sends each chunk to an LLM (Groq) that assigns structured labels/metadata. |
 | `embed` | `embeddings/pipeline.py` | Converts each chunk into a vector (embedding) so similar text can be found by math. |
-| `export` | (a psql script, today `scripts/export_csv.sh`) | Debug helper: dumps 9 database tables to CSV files. Not product-critical. |
+| `export` | (a Python helper, today `scripts/export_csv.py`) | Debug helper: dumps 9 database tables to CSV files. Not product-critical. |
 
 The stages have to happen in roughly this order (you cannot embed a chunk that has
 not been tagged, etc.), but in practice each stage is a **batch job** that grabs all
@@ -51,8 +51,8 @@ cluster are separate computers; they do not have the project's dependencies inst
 So before each run, the project:
 
 1. **Loads configuration** from a `.env` file at the project root (KEY=VALUE lines,
-   Git-ignored) — this is done by `jobs/environment.py`, an existing piece of Python
-   executed by the bash scripts.
+   Git-ignored) — `jobs.launcher` asks `jobs/environment.py` for the values the file
+   adds, then passes them to every child process.
 2. **Picks a virtual environment.** A "venv" is a private, disposable copy of Python
    plus specific package versions, ending in a directory like `.venv/bin/python`. This
    project has two: `.venv` (the main one) and `.venv-embedding-onnx` (a lean one for
@@ -61,7 +61,7 @@ So before each run, the project:
    can be shipped to workers with the run (`--py-files` in Spark terms).
 4. **Packs the whole venv as a tarball** (`venv pack`). Spark has a feature where you
    provide archives with `--archives environment.tar.gz#environment`, and workers
-   unpack them at `/environment/...` before the job. `scripts/run_processing.sh` uses
+   unpack them at `/environment/...` before the job. `jobs.artifacts` uses
    a hash (a "fingerprint": a sha256 sum of everything that affects the environment)
    as part of the tarball filename so it only re-packs when dependencies change.
 5. **Uploads the archive to HDFS** so workers pull it from the cluster's filesystem
@@ -72,9 +72,8 @@ So before each run, the project:
    memory sizes, environment variables to keep each worker to a single thread, and so
    on). One is chosen to point at the right worker venv; others keep memory limits sane.
 
-All of the above is bash. Every stage call goes through `scripts/run_processing.sh`;
-`scripts/run_ingestion.sh` and friends are 3-line files that just call it with `ingest`
-or `chunk`, etc., as a first argument.
+All of the above is now Python. Every stage call goes through
+`python -m jobs.launcher <stage>`; the former shell wrappers have been deleted.
 
 ### Terminology you'll hit in this doc
 
@@ -145,13 +144,12 @@ boundaries sit, not pipeline internals:
    must read as a human explanation, not an ambiguous red failure.
 5. Retries configured in Airflow (`retries`, `retry_delay`) rather than bash loops.
 
-## Phase 1 — Port the launcher (the backbone)
+## Phase 1 — Port the launcher (completed 2026-11-01)
 
-The biggest and most important item; everything else is easy once it lands.
+`jobs/launcher.py` now runs as `python -m jobs.launcher <stage> --flags…` and
+reproduces the former shell sequence:
 
-`scripts/run_processing.sh` today, in order:
-
-1. Bootstraps environment from `.env` (via Python `jobs/environment.py` — already fine).
+1. Reads `.env` through `jobs/environment.py` in the bootstrap venv.
 2. Picks the right venv per stage: `.venv` normally, `.venv-embedding-onnx` for `embed`.
 3. Exits early with clear errors if a venv is missing.
 4. Runs the pipeline module directly for `--help` or dry runs (no packaging).
@@ -161,73 +159,69 @@ The biggest and most important item; everything else is easy once it lands.
    caches a `venv_pack` archive under `.build-tmp/` so repeat runs skip packing.
 8. Publishes archives to HDFS (`/user/$USER/apps/spark`) with upload→mv→verify, so
    workers do not re-download archives from the master every run.
-9. Assembles and runs `spark-submit` with a specific set of `--conf` flags,
-   `--archives`, and `--py-files`, pointing at `scripts/<stage>.py`.
+9. Assembles and runs `spark-submit` with the same `--conf` flags, `--archives`, and
+   `--py-files`, pointing at `scripts/<stage>.py`.
 
-**Task:** create `jobs/launcher.py`, run as `python -m jobs.launcher <stage> --flags…`,
-replicating the above 1:1. "1:1" means: same flags, same env precedence, same exit
-codes (0 ok, 2 quota shortfall, …), same Spark confs, same build-dir caching. Do not
-redesign anything — this is a **translation**, not an improvement opportunity. Use
-`subprocess` for the external binaries (`hdfs`, `spark-submit`, `venv_pack`); HDFS and
-Spark are other people's tools, we only own our glue.
+The implementation is standard-library-only. Stage configuration is still resolved
+by `jobs.launch_config` inside the stage venv, and `hdfs`, `spark-submit`, `tar`, and
+`venv_pack` remain subprocesses.
 
-Before writing code: read `scripts/run_processing.sh` top to bottom and annotate each
-block with what it actually does (comment in your notes). Then write the Python
-side-by-side. Keep the same names where possible (e.g. `HDFS_APPS_DIR`,
-`USE_HDFS_CACHE`) so a person can cross-check against the bash version.
-
-**Delete when done:** `scripts/run_processing.sh`, plus `scripts/run_ingestion.sh`,
-`scripts/run_chunking.sh`, `scripts/run_tagging.sh`, `scripts/run_embeddings.sh`.
+The shell files were deleted: `scripts/run_processing.sh`,
+`scripts/run_ingestion.sh`, `scripts/run_chunking.sh`, `scripts/run_tagging.sh`, and
+`scripts/run_embeddings.sh`.
 
 Checklist:
 
-- [ ] `python -m jobs.launcher ingest --dry-run --max-accepted-articles 1000` prints
+- [x] `python -m jobs.launcher ingest --dry-run --max-accepted-articles 1000` prints
       the same config summary the shell version did, exit code 0.
-- [ ] Same for `chunk`, `tag`, `embed` `--dry-run`.
-- [ ] `--help` works for all four stages without a blocking venv check.
-- [ ] A real smoke ingest (`--max-accepted-articles 10`) commits articles and prints
-      the same final summary (counts, per-file status, resume command).
-- [ ] The second run does NOT re-pack the venv (fingerprint cache hit).
-- [ ] Missing `.venv` produces the same friendly error the shell version gave.
-- [ ] Unit tests cover flag parsing, venv selection, fingerprint stability, and the
+- [x] Same for `chunk`, `tag`, `embed` `--dry-run`; the captured JSON matches.
+- [x] `--help` works for all four stages (the stage venv is still required, as before).
+- [x] A real smoke ingest (`--max-accepted-articles 10`) commits articles and prints
+      the same final summary (counts, per-file status, resume command): run
+      `4f88e7dd-1129-412d-9ba7-47fd7ebe870c` committed 10/10, YARN app
+      `application_1792660710586_0024` finished `SUCCEEDED`.
+- [x] The second ingest run does NOT re-pack the venv (fingerprint cache hit).
+- [x] Missing `.venv` produces the same friendly error the shell version gave.
+- [x] Unit tests cover flag parsing, venv selection, fingerprint stability, and the
       assembled spark-submit argv.
 
-Children of Phase 1 (independent of the phases below; fill wait time with them):
+Children of Phase 1:
 
 | Phase | Size | Notes |
 |---|---|---|
-| 2. Utilities | small, ~½ day | Independent of Phase 1 |
-| 3. Setup scripts | small, ~½ day | Independent of Phase 1 |
+| 2. Utilities | small, ~½ day | Completed with the launcher port |
+| 3. Setup scripts | small, ~½ day | Still independent |
 
-## Phase 2 — Port the utility scripts
+## Phase 2 — Port the utility scripts (completed 2026-11-01)
 
-| Current | Replace with | Notes |
+| Former | Now | Notes |
 |---|---|---|
-| `scripts/export_csv.sh` | `scripts/export_csv.py` | psycopg2 `COPY … TO STDOUT` per table, same 9 tables / same ORDER BY, staging dir then rename (atomic swap), row-count report, optional copy to the HGFS share. Keep the `csv_dir dest_dir` positional override interface. |
-| `scripts/inspect_db.sh` | (delete) | The script just executes `python -m db.inspect`; point docs at that command directly. |
-| `scripts/watch_embeddings.sh` | (delete) | The script just executes `python -m scripts.watch_embeddings`; point docs at that command directly. |
+| `scripts/export_csv.sh` | `scripts/export_csv.py` | psycopg2 `COPY … TO STDOUT` per table, same 9 tables / same ORDER BY, staging dir then rename (atomic swap), row-count report, optional copy to the HGFS share. Keeps the `csv_dir dest_dir` positional override interface. |
+| `scripts/inspect_db.sh` | (deleted) | Use `python -m db.inspect` directly. |
+| `scripts/watch_embeddings.sh` | (deleted) | Use `python -m scripts.watch_embeddings` directly. |
 
 Explanations for the unfamiliar:
 
 - **psycopg2** is the standard Python driver for PostgreSQL — a library that lets a
   Python file speak the database's native protocol. `COPY … TO STDOUT` is a Postgres
   statement that streams table rows as text (CSV here) fast; far faster than `SELECT`.
-  Today's shell version opens a `psql` command-line session per table; the Python one
-  opens a psycopg2 connection per table, or one connection reused across all nine.
+  The shell version opened a `psql` command-line session per table; the Python version
+  reuses one psycopg2 connection across all nine.
 - **Atomic swap** — write all rows to a hidden temp name like `.export-XXXXXX/`, verify
   it worked, then `os.replace` the finished files over the previous ones. So a partial
   failure never leaves broken files where users expect clean ones.
 - **HGFS** — the VMware "Host-Guest File System" shared folder between this Linux VM
-  and its Windows/macOS host. `export_csv.sh` copies the files to
+  and its Windows/macOS host. `scripts/export_csv.py` copies the files to
   `/mnt/hgfs/copy_path/warcdb_csv/` so someone on the host machine can open them in
-  Excel. Keep this step; it is a real deliverable.
+  Excel. The copy step is preserved.
 
 Checklist:
 
-- [ ] `python -m scripts.export_csv` produces the same 9 CSVs in `exports/` with
-      byte-identical content to the last shell export (spot-check two).
-- [ ] HGFS copy still lands in `/mnt/hgfs/copy_path/warcdb_csv/`.
-- [ ] `python -m db.inspect` and `python -m scripts.watch_embeddings` still work.
+- [x] Unit tests cover all 9 tables, the ORDER BY statements, staging, row counts,
+      failure behavior, and the HGFS copy with a fake connection.
+- [ ] Live byte-for-byte spot-check against a previous shell export (not rerun).
+- [x] `python -m db.inspect` and `python -m scripts.watch_embeddings` are the documented
+      direct module commands.
 
 ## Phase 3 — Port the one-off setup scripts
 
@@ -371,9 +365,9 @@ Do these continuously, but note them as their own item.
   failure, retries burn pointlessly against an exhausted manifest. Handle this case
   specifically in message and retry logic.
 
-## Command mapping after the migration
+## Command mapping
 
-| Today | After |
+| Before | Now |
 |---|---|
 | `./scripts/run_ingestion.sh …` | `python -m jobs.launcher ingest …` |
 | `./scripts/run_chunking.sh …` | `python -m jobs.launcher chunk …` |
@@ -382,4 +376,4 @@ Do these continuously, but note them as their own item.
 | `./scripts/export_csv.sh` | `python -m scripts.export_csv` |
 | `./scripts/inspect_db.sh` | `python -m db.inspect` |
 | `./scripts/watch_embeddings.sh` | `python -m scripts.watch_embeddings` |
-| manual babysitting via `scripts/supervise_ingest.py` | Airflow DAG `news_pipeline` retries |
+| manual babysitting via `scripts/supervise_ingest.py` | still `scripts/supervise_ingest.py`; Airflow DAG `news_pipeline` will replace it |

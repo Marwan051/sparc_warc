@@ -30,11 +30,33 @@ positive_int(value)                           # argparse type: int > 0
 
 # jobs/environment.py
 load_environment(path)                        # optional dotenv load, no overwrite
-main()                                        # records exported keys, loads .env, execvpe into launcher
+read_environment(path) -> dict                # only the names the file added
+main()                                        # --json overlay report; legacy exec wrapper otherwise
 
 # jobs/launch_config.py
 resolve(stage, argv) -> tuple                 # (executor_count, dry_run, driver_mem, executor_mem, overhead)
-main()                                        # tab-separated stdout resolver for shell launchers
+main()                                        # tab-separated stdout resolver for the launcher
+
+# jobs/errors.py
+LaunchError(message="", exit_code=1)          # message plus launcher exit code
+
+# jobs/launcher.py
+main(argv=None) -> int                        # load env, select venv, package, submit one stage
+run(arguments) -> int                         # stage parsing, help/dry-run, artifact orchestration
+
+# jobs/artifacts.py
+venv_fingerprint(stage, venv, root, environ) -> str
+tree_fingerprint(path, environ, maxdepth_one=False) -> str
+write_project_zip(root, destination)
+ensure_venv_archive(venv, fingerprint, build_dir, task_tmp, environ) -> Path
+ensure_model_archive(source, build_dir, task_tmp, environ) -> (str, Path)
+ensure_jars_archive(spark_home, build_dir, task_tmp, environ) -> (str, Path)
+publish_artifacts(...) -> (archives_spec, extra_conf, model_spec)
+
+# jobs/spark.py
+SparkPlan(...)                                # frozen submission inputs
+submit_command(plan, environ) -> list         # exact spark-submit argv
+is_help(arguments) -> bool
 
 # jobs/batching.py
 serialized_size(value) -> int
@@ -436,12 +458,18 @@ main(argv=None)
 resolve_config(conn, chunking_version, embedding_model, embedding_version) -> ...
 search(query: str, top_k: int, chunking_version=None, embedding_model=None, ...) -> list
 main()
+
+# scripts/export_csv.py
+TABLES, ORDER_BY
+export(connection, csv_dir, dest_dir)         # staging files, atomic moves, row counts, HGFS copy
+main(argv=None, connect=None) -> int          # csv_dir / dest_dir positional overrides
 ```
 
 None of the script functions carry docstrings or annotations except
-`vector_search_test.resolve_config`. Shell launchers (`run_ingestion.sh`,
-`run_*_processing.sh`, `inspect_db.sh`, `export_csv.sh`, `watch_embeddings.sh`) pair
-with `jobs/environment.py` + `jobs/launch_config.py` as the launcher chain.
+`vector_search_test.resolve_config`. `jobs.launcher` is the launcher chain,
+paired with `jobs/environment.py`, `jobs/launch_config.py`, `jobs/artifacts.py`,
+and `jobs/spark.py`. `python -m db.inspect` and
+`python -m scripts.watch_embeddings` are direct module commands.
 
 ---
 

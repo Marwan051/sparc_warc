@@ -67,7 +67,7 @@ with DAG(
     launcher = BashOperator(
         task_id="launcher_dry_run",
         bash_command=(
-            f"bash {PROJECT}/scripts/run_ingestion.sh "
+            f"{PROJECT}/.venv/bin/python -m jobs.launcher ingest "
             "--dry-run --max-accepted-articles 10 "
         ),
         cwd=PROJECT,

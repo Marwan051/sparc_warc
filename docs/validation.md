@@ -8,8 +8,8 @@ After organizing the application into top-level `ingestion/`, `db/`, and
 - `.venv/bin/python -m unittest discover -s tests -v`: 32 tests,
   17 passed and 15 skipped (12 require `WARC_TEST_DSN`; 3 require optional
   LangChain dependencies).
-- `scripts/run_ingestion.sh` passed dry run from outside the repository without
-  packaging or starting Spark. Legacy root wrappers have been removed.
+- `python -m jobs.launcher ingest` passed dry run from outside the repository
+  without packaging or starting Spark. Legacy root wrappers have been removed.
 - Application modules and `scripts/ingest.py` passed dry run using an isolated
   worker ZIP outside the checkout, with optional LangChain imports blocked.
 - All three files in `requirements/` parsed locally with their relative includes.
@@ -79,6 +79,9 @@ filesystem and publishes local archives on that same filesystem.
 
 ## YARN cluster validation (2026-09-30, `spark-master:8032`, 3 workers RUNNING)
 
+The commands below used the root `run_to_db.sh` wrapper that has since been removed.
+The current equivalent is `python -m jobs.launcher ingest`.
+
 ```bash
 NUM_FILES=1 MAX_ACCEPTED_ARTICLES=10 MAX_ACCEPTED_PER_FILE=10 ./run_to_db.sh
 NUM_FILES=3 MAX_ACCEPTED_ARTICLES=9 MAX_ACCEPTED_PER_FILE=3 ./run_to_db.sh
@@ -104,6 +107,53 @@ NUM_FILES=3 MAX_ACCEPTED_ARTICLES=9 MAX_ACCEPTED_PER_FILE=3 ./run_to_db.sh
   summary without new inserts. Eventlogs under `/spark-logs/eventlog_v2_...`.
 * Atomic HDFS artifact publication exercised (venv + `spark-libs-*.zip` via
   `*.upload-*` + rename, `spark.yarn.archive`).
+
+## Python launcher port (2026-11-01)
+
+The stage launcher is now `python -m jobs.launcher <ingest|chunk|tag|embed>`.
+It reproduces the removed shell wrappers: the same flags, `.env` precedence, stage
+venv selection, cache keys, and `spark-submit` argv. The launcher is
+standard-library-only; `.env` reading, stage-config resolution, `venv_pack`, `tar`,
+`hdfs`, and `spark-submit` remain child processes.
+
+Verified against the captured shell baseline:
+
+* Dry-run JSON, `--help` text, and assembled `spark-submit` argv match for all four
+  stages. A failed child's exit code is passed through (tested with exit 7).
+* Exported variables win over `.env`; `SPARK_WARC_EXPORTED_ENV_KEYS` is captured
+  before the overlay, and the worker thread variables are set.
+* Venv fingerprints: ingest `3e93d890...`, chunk/tag `fa731176...`, embed
+  `94b59442...`. A second ingest reused `pyspark_venv-3e93...tar.gz` without calling
+  `venv_pack`.
+* HDFS publishing reused `pyspark_venv-f93284...tar.gz` and
+  `spark-libs-d977...zip`; `USE_HDFS_CACHE=0` makes no HDFS calls.
+* `tests.test_spark`, `tests.test_artifacts`, `tests.test_environment`,
+  `tests.test_launcher`, `tests.test_processing`, and `tests.test_export_csv`:
+  41 tests pass, 3 database tests skipped.
+
+Real smoke ingest (one executor because the workers did not have room for the default
+three; the three-executor argv is covered by the launcher tests):
+
+```bash
+SPARK_EXECUTOR_INSTANCES=1 python -m jobs.launcher ingest \
+  --year 2026 --month 06 --num-files 1 \
+  --max-accepted-articles 10 --max-accepted-per-file 10 --no-progress
+```
+
+* Run `4f88e7dd-1129-412d-9ba7-47fd7ebe870c`: `complete; committed 10/10 new`.
+* File `CC-NEWS-20260601022734-08108.warc.gz`: 10 new, `quota_reached`.
+* Counters: records 57, non_html 29, language_rejected 17, too_short_or_corrupt 1,
+  compressed_bytes_read 2031616, result_bytes 117759, elapsed 21.996s.
+* DB: `ingest_runs.status=complete` and `inserted_count=10`; one `ingest_chunks`
+  row with 10 inserts; `ingest_run_files` status `quota_reached`.
+* YARN app `application_1792660710586_0024`: `FINISHED SUCCEEDED`.
+* Printed resume command:
+  `RESUME_RUN_ID=4f88e7dd-... python -m jobs.launcher ingest`.
+
+Wall time was about nine minutes because the AM waited in `ACCEPTED` and the executor
+container took several minutes to start on a memory-constrained worker. The Spark job
+itself reports 21.996s; the delay is cluster scheduling/startup latency, not launcher
+work.
 
 ## Remaining work
 

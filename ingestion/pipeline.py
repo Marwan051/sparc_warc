@@ -524,7 +524,7 @@ def _summary(run_id, config, conn):
                         totals[key] = totals.get(key, 0) + value
         print("Counters: " + json.dumps(totals, sort_keys=True))
     conn.rollback()
-    print(f"Resume command: RESUME_RUN_ID={run_id} ./scripts/run_ingestion.sh")
+    print(f"Resume command: RESUME_RUN_ID={run_id} python -m jobs.launcher ingest")
 
 
 def run_streaming_pipeline(argv=None):
@@ -560,7 +560,7 @@ def run_streaming_pipeline(argv=None):
             bar = _make_progress_bar(_bar_total(config["target_articles"], config["per_file_target"],
                                                 len(urls)),
                                      0, not config["no_progress"])
-        print(f"Resume command: RESUME_RUN_ID={run_id} ./scripts/run_ingestion.sh")
+        print(f"Resume command: RESUME_RUN_ID={run_id} python -m jobs.launcher ingest")
         wave = 0
         invocation = uuid.uuid4().hex
         # Consecutive waves that produced zero commits AND had failed results

@@ -4,11 +4,12 @@ Independent YARN jobs materialize chunks, analyze eligible chunks, and embed
 eligible chunks. They default to one concurrent Spark task per requested executor. PostgreSQL reads and writes stay
 on the driver; executors receive bounded payloads and do not need DB credentials.
 
-All four launchers (ingestion, chunking, tagging, embedding) delegate packaging and YARN
-submission to `scripts/run_processing.sh`. Spark startup and task submission live
-in `jobs/runtime.py` and `jobs/batching.py`. Ingestion retains its original Spark
-retry settings, one-partition-per-file wave, ordered commits, quotas, and recovery
-logic; chunking, tagging, and embedding use independent jobs with per-batch completion.
+All four stages (ingestion, chunking, tagging, embedding) use the Python launcher
+`python -m jobs.launcher <stage>` for packaging and YARN submission. Spark startup
+and task submission live in `jobs/runtime.py` and `jobs/batching.py`. Ingestion
+retains its original Spark retry settings, one-partition-per-file wave, ordered
+commits, quotas, and recovery logic; chunking, tagging, and embedding use
+independent jobs with per-batch completion.
 
 ```text
 PostgreSQL articles -> driver batches -> Spark cleaning/splitting -> article_chunks
@@ -24,7 +25,7 @@ other services continue to use `.venv`:
 ```bash
 bash scripts/setup_embedding_onnx_env.sh
 bash scripts/download_quantized_embedding_model.sh
-./scripts/run_embeddings.sh --embedding-limit 100
+python -m jobs.launcher embed --embedding-limit 100
 ```
 
 The model download uses the existing BGE-M3 tokenizer assets and a pinned ONNX
@@ -55,16 +56,16 @@ environment that the launchers package for YARN:
 
 ```bash
 .venv/bin/python -m pip install -r requirements/rag.txt
-./scripts/run_chunking.sh --document-limit 100
+python -m jobs.launcher chunk --document-limit 100
 
 .venv/bin/python -m pip install -r requirements/tagging-groq.txt
 export GROQ_API_KEY=your-key
-./scripts/run_tagging.sh --analysis-limit 30
+python -m jobs.launcher tag --analysis-limit 30
 ```
 
 Export `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, and `PGPASSWORD` as for ingestion.
-Set `SPARK_HOME` to the cluster Spark installation. All four shell launchers
-load project-root `.env` defaults; direct Python module commands do not.
+Set `SPARK_HOME` to the cluster Spark installation. The launcher loads project-root
+`.env` defaults; direct module commands do not.
 The loader uses the existing `.venv` interpreter (or an externally supplied
 `VENV_DIR`), so that bootstrap environment must contain `requirements/base.txt`.
 The Groq key is delivered through executor environment configuration
@@ -73,7 +74,7 @@ or command-line arguments. Use only a trusted cluster: redaction is not a secret
 store and cluster administrators can access executor environments.
 
 `--dry-run` validates arguments without opening Spark, PostgreSQL, or a provider
-connection and without packaging. All launchers support `--help`.
+connection and without packaging. All stages support `--help`.
 
 ## Configuration
 
@@ -104,11 +105,11 @@ embedding therefore defaults to two executors and two concurrent tasks. For 50
 pending chunks in batches of ten:
 
 ```bash
-./scripts/run_embeddings.sh --items-per-task 10 --embedding-limit 50
+python -m jobs.launcher embed --items-per-task 10 --embedding-limit 50
 ```
 
 Monitor corpus-wide pending embeddings every 10 seconds with
-`./scripts/watch_embeddings.sh` (Ctrl+C stops the monitor, not the job). For a
+`python -m scripts.watch_embeddings` (Ctrl+C stops the monitor, not the job). For a
 limited run, add `--run-limit 50 --starting-embedded N`, where `N` is the
 embedded count recorded before that run started; without a saved baseline, the
 database cannot distinguish that run's remaining work from other pending chunks.
@@ -120,9 +121,9 @@ to no chunks. The tagging limit counts scheduled chunks, including model errors.
 and `NOISE` rows are skipped. Tagging does not implicitly run chunking.
 
 ```bash
-./scripts/run_chunking.sh --items-per-task 25 --parallel-tasks 3
-./scripts/run_tagging.sh --items-per-task 10 --parallel-tasks 3 --retry-errors
-./scripts/run_tagging.sh --analysis-limit 5 --export-json results.json
+python -m jobs.launcher chunk --items-per-task 25 --parallel-tasks 3
+python -m jobs.launcher tag --items-per-task 10 --parallel-tasks 3 --retry-errors
+python -m jobs.launcher tag --analysis-limit 5 --export-json results.json
 ```
 
 Export writes all stored analyses for the selected chunking/backend/model/analysis
@@ -194,7 +195,7 @@ whole request list and run native model batches behind the same interface:
 TAGGING_BACKEND=my_adapter:TransformersBackend \
 TAGGING_MODEL=my-model \
 TAGGING_ANALYSIS_VERSION=my-model-v1 \
-./scripts/run_tagging.sh --items-per-task 8
+python -m jobs.launcher tag --items-per-task 8
 ```
 
 Install custom adapters and their dependencies in `VENV_DIR` before packaging.

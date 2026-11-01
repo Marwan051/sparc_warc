@@ -211,8 +211,9 @@ or run a batch analyzer. See [processing and recovery](processing.md).
 The application uses top-level feature packages. Run Python module commands from
 the project root; no editable install or extra source path is needed. Spark's
 `--py-files` archive contains `ingestion/`, `db/`, `chunking/`, `tagging/`, and `jobs/`, preserving the
-same imports on workers. The launcher resolves the project root itself and can
-be invoked from another directory.
+same imports on workers. The launcher resolves the project root itself and changes
+into it, so it behaves the same when started from another directory (with the
+project on `PYTHONPATH`).
 
 - **ingestion** coordinates Spark and transforms WARC records into article rows.
   It uses `db` but does not import chunking or optional RAG dependencies.
@@ -227,7 +228,8 @@ be invoked from another directory.
 - **jobs** supplies bounded batch packing, concurrent Spark submission, and CLI
   runtime helpers. All three pipelines share Spark startup and task submission;
   ingestion retains its own task allocation and transactional wave scheduling.
-  The three shell launchers share packaging through `scripts/run_processing.sh`.
+  The three post-ingestion stages share packaging through `jobs.launcher`,
+  `jobs.artifacts`, and `jobs.spark`.
 
 Shared integer validators live in `jobs.validation` and have no optional dependencies.
 Use `integer` for named configuration values, `env_int` for environment defaults,
@@ -247,7 +249,7 @@ adapters with that feature and compose stages at their entry points. Package
 imports should not open connections, load models, or run jobs.
 
 Keep optional dependencies separate from ingestion requirements. Add new tests
-under `tests/`; put operational launchers in `scripts/`. The ingestion module
+under `tests/`; put operational commands in `scripts/`. The ingestion module
 retains its configuration and scheduling logic to preserve behavior during this
 structural change.
 
@@ -263,10 +265,11 @@ Ingestion **chunks** are bounded worker results and commit receipts. RAG text
 | [ingestion/warc.py](../ingestion/warc.py) | Streaming WARC parsing and gzip validation |
 | [ingestion/extraction.py](../ingestion/extraction.py) | Article text, metadata, and language detection |
 | [ingestion/text.py](../ingestion/text.py) | Encoding and language validation |
-| [scripts/run_ingestion.sh](../scripts/run_ingestion.sh), [scripts/ingest.py](../scripts/ingest.py) | Packaging and YARN submission |
+| [jobs/launcher.py](../jobs/launcher.py), [jobs/artifacts.py](../jobs/artifacts.py), [jobs/spark.py](../jobs/spark.py) | Environment loading, packaging, fingerprints, and YARN submission |
+| [scripts/ingest.py](../scripts/ingest.py) | Spark entry point for ingestion |
 | [db/documents.py](../db/documents.py) | Streaming database documents |
 | [chunking/splitters.py](../chunking/splitters.py) | Incremental document splitting |
-| [scripts/inspect_db.sh](../scripts/inspect_db.sh), [scripts/export_csv.sh](../scripts/export_csv.sh) | Inspection and post-run CSV export |
+| [db/inspect.py](../db/inspect.py), [scripts/export_csv.py](../scripts/export_csv.py) | Inspection and post-run CSV export |
 
 Extraction can leave residual site boilerplate. Downstream RAG processing may need
 to filter repetitive footer or subscription text before indexing.

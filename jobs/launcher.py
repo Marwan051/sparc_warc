@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import Literal, TypedDict, Unpack, overload
 
 from jobs import artifacts, spark
 from jobs.errors import LaunchError
@@ -19,6 +20,61 @@ STAGES = {
     "tag": "tagging.pipeline",
     "embed": "embeddings.pipeline",
 }
+
+
+class IngestLaunchOptions(TypedDict, total=False):
+    year: str | int
+    month: str | int
+    num_files: str | int
+    resume_run_id: str
+    executor_instances: int
+    max_accepted_articles: int
+    max_accepted_per_file: int
+    max_files_per_round: int
+    start_file_offset: int
+    worker_max_candidates: int
+    worker_max_result_bytes: int
+    worker_max_input_bytes: int
+    worker_max_seconds: int
+    max_html_bytes: int
+    max_article_bytes: int
+    min_word_count: int
+    max_retries: int
+    db_batch_size: int
+    lingua_min_confidence: float
+    use_trafilatura: bool
+    no_progress: bool
+    dry_run: bool
+
+
+class ProcessingLaunchOptions(TypedDict, total=False):
+    dry_run: bool
+    executor_instances: int
+    chunking_version: str
+    parallel_tasks: int
+    items_per_task: int
+    input_bytes: int
+    result_bytes: int
+
+
+class ChunkLaunchOptions(ProcessingLaunchOptions, total=False):
+    document_limit: int
+
+
+class TagLaunchOptions(ProcessingLaunchOptions, total=False):
+    analysis_limit: int
+    retry_errors: bool
+    backend: str
+    model: str
+    analysis_version: str
+    export_json: str
+
+
+class EmbedLaunchOptions(ProcessingLaunchOptions, total=False):
+    embedding_limit: int
+    model: str
+    max_length: int
+    embedding_batch_size: int
 
 # These options are argparse boolean actions. Keeping the small exception map
 # here lets the Python API produce the same argv the existing CLI accepts.
@@ -289,7 +345,31 @@ def _call(arguments):
         return 1
 
 
-def launch(stage, **options):
+@overload
+def launch(
+    stage: Literal["ingest"], **options: Unpack[IngestLaunchOptions],
+) -> int: ...
+
+
+@overload
+def launch(
+    stage: Literal["chunk"], **options: Unpack[ChunkLaunchOptions],
+) -> int: ...
+
+
+@overload
+def launch(
+    stage: Literal["tag"], **options: Unpack[TagLaunchOptions],
+) -> int: ...
+
+
+@overload
+def launch(
+    stage: Literal["embed"], **options: Unpack[EmbedLaunchOptions],
+) -> int: ...
+
+
+def launch(stage: str, **options: object) -> int:
     """Launch one Spark stage using Python keyword options.
 
     Option names use Python identifiers corresponding to the stage's CLI flags,

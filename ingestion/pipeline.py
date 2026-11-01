@@ -40,7 +40,7 @@ from ingestion.text import is_target_language
 
 
 def _parse_num_files(raw):
-    text = ("15" if raw is None else raw).strip().lower()
+    text = ("all" if raw is None else raw).strip().lower()
     if text in ("", "all", "none", "0"):
         return None
     try:
@@ -110,7 +110,7 @@ def load_config(argv=None):
         "month": month,
         "manifest_id": f"{year}/{month}",
         "executor_instances": executors,
-        "num_files": _parse_num_files(chosen("NUM_FILES", "15")),
+        "num_files": _parse_num_files(chosen("NUM_FILES", "all")),
         "start_file_offset": number("START_FILE_OFFSET", 0, 0),
         "target_articles": number("MAX_ACCEPTED_ARTICLES", 0, 0),
         "per_file_target": number("MAX_ACCEPTED_PER_FILE", 0, 0),

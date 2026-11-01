@@ -92,7 +92,7 @@ def chunk(candidates=None, start=0, end=100, eof=False, error=None, file='file-1
 
 class UnitTests(unittest.TestCase):
     def test_defaults_and_validation(self):
-        self.assertEqual(config()['num_files'], 15)
+        self.assertIsNone(config()['num_files'])
         self.assertIsNone(job._parse_num_files(''))
         for setting, value in [('MAX_ACCEPTED_ARTICLES', '-1'), ('MAX_FILES_PER_ROUND', '0'),
                                ('LINGUA_MIN_CONFIDENCE', 'nan'), ('MAX_RETRIES', '0'),

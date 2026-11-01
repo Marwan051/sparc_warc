@@ -15,7 +15,7 @@ def resolve(stage, argv):
     else:
         raise ValueError(f"unknown stage: {stage}")
 
-    def memory(name, default):
+    def memory(name: str, default: str) -> str:
         value = os.environ.get(name, default)
         if not re.fullmatch(r"[1-9][0-9]*[kKmMgG]?", value):
             raise ValueError(f"{name} must be a positive Spark memory size")
@@ -23,8 +23,10 @@ def resolve(stage, argv):
 
     driver = memory("SPARK_DRIVER_MEMORY", "512m")
     if stage == "embed":
-        executor = memory("EMBEDDING_EXECUTOR_MEMORY", os.environ.get("SPARK_EXECUTOR_MEMORY", "512m"))
-        overhead = memory("EMBEDDING_EXECUTOR_MEMORY_OVERHEAD", os.environ.get("SPARK_EXECUTOR_MEMORY_OVERHEAD", "1g"))
+        executor_default = os.environ.get("SPARK_EXECUTOR_MEMORY", "512m")
+        overhead_default = os.environ.get("SPARK_EXECUTOR_MEMORY_OVERHEAD", "1g")
+        executor = memory("EMBEDDING_EXECUTOR_MEMORY", executor_default)
+        overhead = memory("EMBEDDING_EXECUTOR_MEMORY_OVERHEAD", overhead_default)
     else:
         executor = memory("SPARK_EXECUTOR_MEMORY", "512m")
         overhead = memory("SPARK_EXECUTOR_MEMORY_OVERHEAD", "512m")

@@ -151,7 +151,7 @@ bytes. For shared precedence and processing flags, see
 | Variable | Default | Purpose |
 |---|---:|---|
 | `YEAR` / `MONTH` | `2026` / `05` | Monthly CC-NEWS manifest |
-| `NUM_FILES` | `15` | File limit; `all`, `0`, or empty selects the remainder |
+| `NUM_FILES` | `all` | File limit; `all`, `0`, or empty selects the remainder |
 | `START_FILE_OFFSET` | `0` | Skip this many manifest entries |
 | `MAX_ACCEPTED_ARTICLES` | `0` | Total new-article target; `0` means unlimited |
 | `MAX_ACCEPTED_PER_FILE` | `0` | Per-file maximum within a run; `0` means unlimited |

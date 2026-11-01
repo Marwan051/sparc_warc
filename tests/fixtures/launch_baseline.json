@@ -11,7 +11,7 @@
       "max_retries": 3,
       "min_word_count": 80,
       "month": "05",
-      "num_files": 15,
+      "num_files": null,
       "per_file_target": 0,
       "start_file_offset": 0,
       "target_articles": 17,

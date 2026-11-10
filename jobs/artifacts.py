@@ -4,6 +4,8 @@ import hashlib
 import os
 import shutil
 import subprocess
+import sys
+import time
 import zipfile
 from pathlib import Path
 
@@ -18,6 +20,14 @@ DISTRIBUTIONS = (
     'for d in m.distributions(path=[sysconfig.get_path("purelib")]))))'
 )
 VERSION = "import sys; print(sys.version); print(sys.executable)"
+
+
+def _log_timing(label, started):
+    print(
+        f"[launcher] {label}: {time.perf_counter() - started:.2f}s",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def _exit_code(returncode):
@@ -41,14 +51,6 @@ def _capture(command, environ):
     return subprocess.run(
         command, env=environ, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
-
-
-def sha256_file(path):
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def venv_fingerprint(stage, venv, root, environ):
@@ -125,6 +127,44 @@ def tree_fingerprint(path, environ, maxdepth_one=False):
     ], environ)
 
 
+def metadata_fingerprint(path, environ, maxdepth_one=False):
+    """Hash file names, sizes, and mtimes without reading file contents."""
+    find = ["find", str(path)]
+    if maxdepth_one:
+        find += ["-maxdepth", "1", "-name", "*.jar"]
+    find += ["-type", "f", "-printf", "%p\\t%s\\t%T@\\0"]
+    return _pipeline_digest([find, ["sort", "-z"], ["sha256sum"]], environ)
+
+
+def cached_tree_fingerprint(path, build_dir, environ, maxdepth_one=False):
+    """Reuse a content fingerprint until the tree's metadata changes.
+
+    Spark jars and the embedding model are large and change rarely. Hashing
+    them on every phase dominates cold-cache launcher time, so use a cheap
+    name/size/mtime key to decide whether the real digest must be recomputed.
+    """
+    metadata = metadata_fingerprint(path, environ, maxdepth_one)
+    cache = Path(build_dir) / f".fingerprint-v1-{metadata}.txt"
+    refresh = (environ.get("SPARK_WARC_REFRESH_FINGERPRINTS") or "").lower()
+    value = ""
+    if refresh not in {"1", "true", "yes", "on"}:
+        try:
+            value = cache.read_text().strip()
+        except OSError:
+            value = ""
+    if value:
+        return value
+
+    fingerprint = tree_fingerprint(path, environ, maxdepth_one)
+    temporary = cache.with_name(f"{cache.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(fingerprint + "\n")
+        os.replace(temporary, cache)
+    except OSError:
+        temporary.unlink(missing_ok=True)
+    return fingerprint
+
+
 def write_project_zip(root, destination):
     """Write the code Spark workers import; directory entries are unnecessary."""
     with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED) as archive:
@@ -155,19 +195,24 @@ def model_source(root, environ):
     ):
         raise LaunchError(
             f"Missing INT8 embedding model or tokenizer in {path}. Prepare it "
-            "with scripts/setup_embedding_onnx_env.sh and "
-            "scripts/download_quantized_embedding_model.sh."
+            "with scripts/setup_embedding_onnx_env.py and "
+            "scripts/download_quantized_embedding_model.py."
         )
     return path
 
 
 def ensure_model_archive(source, build_dir, task_tmp, environ):
-    fingerprint = tree_fingerprint(source, environ)
+    started = time.perf_counter()
+    fingerprint = cached_tree_fingerprint(source, build_dir, environ)
+    _log_timing("model fingerprint", started)
     archive = build_dir / f"embedding_model-{fingerprint}.tar.gz"
     if not archive.is_file():
+        print("Packing embedding model...", flush=True)
+        started = time.perf_counter()
         target = task_tmp / "embedding-model.tar.gz"
         _run(["tar", "-C", str(source), "-czf", str(target), "."], environ)
         os.replace(target, archive)
+        _log_timing("model archive pack", started)
     return fingerprint, archive
 
 
@@ -176,6 +221,7 @@ def ensure_venv_archive(venv, fingerprint, build_dir, task_tmp, environ):
     if archive.is_file():
         return archive
     print("Packing worker environment...", flush=True)
+    started = time.perf_counter()
     target = task_tmp / "environment.tar.gz"
     _run(
         [str(venv / "bin" / "python"), "-m", "venv_pack",
@@ -183,6 +229,7 @@ def ensure_venv_archive(venv, fingerprint, build_dir, task_tmp, environ):
         environ,
     )
     os.replace(target, archive)
+    _log_timing("venv archive pack", started)
     return archive
 
 
@@ -196,15 +243,22 @@ def check_embedding_imports(venv, environ):
 
 def ensure_jars_archive(spark_home, build_dir, task_tmp, environ):
     jars = Path(spark_home) / "jars"
-    fingerprint = tree_fingerprint(jars, environ, maxdepth_one=True)
+    started = time.perf_counter()
+    fingerprint = cached_tree_fingerprint(
+        jars, build_dir, environ, maxdepth_one=True,
+    )
+    _log_timing("spark jars fingerprint", started)
     archive = build_dir / f"spark-libs-{fingerprint}.zip"
     if not archive.is_file():
+        print("Packing Spark jars...", flush=True)
+        started = time.perf_counter()
         target = task_tmp / "spark-libs.zip"
         with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as output:
             for path in sorted(jars.rglob("*")):
                 if path.is_file():
                     output.write(path, path.relative_to(jars).as_posix())
         os.replace(target, archive)
+        _log_timing("spark jars archive pack", started)
     return fingerprint, archive
 
 
@@ -236,9 +290,21 @@ def _hdfs(binary, arguments, environ, quiet=False):
     ).returncode
 
 
-def hdfs_available(environ):
-    binary = hdfs_binary(environ)
-    return bool(binary) and _hdfs(binary, ["-test", "-e", "/"], environ, quiet=True) == 0
+def hdfs_existing(binary, destinations, environ):
+    """Return the artifact names that already exist using one HDFS JVM."""
+    if not destinations:
+        return set()
+    result = subprocess.run(
+        [binary, "dfs", "-stat", "%n", *destinations],
+        env=environ,
+        text=True,
+        capture_output=True,
+    )
+    return {
+        line.strip()
+        for line in result.stdout.splitlines()
+        if line.strip()
+    }
 
 
 def publish_hdfs(binary, source, destination, apps_dir, task_tmp, environ):
@@ -263,20 +329,8 @@ def publish_artifacts(
     archives = f"{venv_archive}#environment"
     extra_conf = []
     binary = hdfs_binary(environ)
-    if not binary or not hdfs_available(environ):
+    if not binary:
         return archives, (), None
-
-    remote_venv = f"{apps_dir}/pyspark_venv-{sha256_file(venv_archive)}.tar.gz"
-    if publish_hdfs(binary, venv_archive, remote_venv, apps_dir, task_tmp, environ):
-        archives = f"hdfs://{remote_venv}#environment"
-
-    model_spec = None
-    if stage == "embed":
-        remote_model = f"{apps_dir}/embedding_model-{model_fingerprint}.tar.gz"
-        if publish_hdfs(binary, model_archive, remote_model, apps_dir, task_tmp, environ):
-            model_spec = f"hdfs://{remote_model}#embedding-model"
-        else:
-            model_spec = f"{model_archive}#embedding-model"
 
     spark_home = environ.get("SPARK_HOME")
     if not spark_home:
@@ -284,7 +338,50 @@ def publish_artifacts(
     jars_fingerprint, jars_archive = ensure_jars_archive(
         spark_home, build_dir, task_tmp, environ,
     )
+
+    remote_venv = f"{apps_dir}/{venv_archive.name}"
     remote_jars = f"{apps_dir}/spark-libs-{jars_fingerprint}.zip"
-    if publish_hdfs(binary, jars_archive, remote_jars, apps_dir, task_tmp, environ):
+    destinations = [remote_venv, remote_jars]
+    remote_model = None
+    if stage == "embed":
+        remote_model = f"{apps_dir}/embedding_model-{model_fingerprint}.tar.gz"
+        destinations.append(remote_model)
+
+    started = time.perf_counter()
+    existing = hdfs_existing(binary, destinations, environ)
+    _log_timing("hdfs artifact check", started)
+
+    if remote_venv.rsplit("/", 1)[-1] in existing:
+        archives = f"hdfs://{remote_venv}#environment"
+    else:
+        started = time.perf_counter()
+        if publish_hdfs(
+            binary, venv_archive, remote_venv, apps_dir, task_tmp, environ,
+        ):
+            archives = f"hdfs://{remote_venv}#environment"
+        _log_timing("hdfs venv publish", started)
+
+    model_spec = None
+    if stage == "embed":
+        if remote_model.rsplit("/", 1)[-1] in existing:
+            model_spec = f"hdfs://{remote_model}#embedding-model"
+        else:
+            started = time.perf_counter()
+            if publish_hdfs(
+                binary, model_archive, remote_model, apps_dir, task_tmp, environ,
+            ):
+                model_spec = f"hdfs://{remote_model}#embedding-model"
+            else:
+                model_spec = f"{model_archive}#embedding-model"
+            _log_timing("hdfs model publish", started)
+
+    if remote_jars.rsplit("/", 1)[-1] in existing:
         extra_conf.append(f"spark.yarn.archive=hdfs://{remote_jars}")
+    else:
+        started = time.perf_counter()
+        if publish_hdfs(
+            binary, jars_archive, remote_jars, apps_dir, task_tmp, environ,
+        ):
+            extra_conf.append(f"spark.yarn.archive=hdfs://{remote_jars}")
+        _log_timing("hdfs jars publish", started)
     return archives, tuple(extra_conf), model_spec

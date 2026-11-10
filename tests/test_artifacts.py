@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+from unittest import mock
 
 from jobs import artifacts
 
@@ -201,6 +202,127 @@ sys.exit(0 if sys.argv[2:4] == ['-test', '-e'] else 1)
                 [json.loads(line) for line in log.read_text().splitlines()],
                 [["dfs", "-test", "-e", "/apps/venv.tar.gz"]],
             )
+
+    def test_cached_tree_fingerprint_reuses_the_content_digest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "model"
+            source.mkdir()
+            (source / "weights.bin").write_bytes(b"weights")
+            build = root / "build"
+            build.mkdir()
+
+            with mock.patch.object(
+                artifacts, "tree_fingerprint",
+                wraps=artifacts.tree_fingerprint,
+            ) as fingerprint:
+                first = artifacts.cached_tree_fingerprint(
+                    source, build, os.environ,
+                )
+                second = artifacts.cached_tree_fingerprint(
+                    source, build, os.environ,
+                )
+
+            self.assertEqual(first, second)
+            self.assertEqual(fingerprint.call_count, 1)
+            self.assertEqual(
+                len(list(build.glob(".fingerprint-v1-*.txt"))), 1,
+            )
+
+            (source / "weights.bin").write_bytes(b"changed weights")
+            third = artifacts.cached_tree_fingerprint(source, build, os.environ)
+            self.assertNotEqual(third, first)
+
+            with mock.patch.object(
+                artifacts, "tree_fingerprint",
+                wraps=artifacts.tree_fingerprint,
+            ) as refresh:
+                artifacts.cached_tree_fingerprint(
+                    source, build,
+                    dict(os.environ, SPARK_WARC_REFRESH_FINGERPRINTS="1"),
+                )
+            self.assertEqual(refresh.call_count, 1)
+
+    def test_hdfs_existing_checks_all_artifacts_in_one_call(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            log = root / "hdfs.log"
+            binary = root / "hdfs"
+            binary.write_text(
+                "#!" + sys.executable + "\n"
+                + """
+import json, os, sys
+open(os.environ['HDFS_LOG'], 'a').write(json.dumps(sys.argv[1:]) + '\\n')
+paths = sys.argv[4:]
+for path in paths:
+    print(path.rsplit('/', 1)[-1])
+sys.exit(1)
+"""
+            )
+            binary.chmod(0o755)
+            environment = dict(os.environ, HDFS_LOG=str(log))
+
+            existing = artifacts.hdfs_existing(
+                str(binary),
+                ["/apps/venv.tar.gz", "/apps/jars.zip", "/apps/model.tar.gz"],
+                environment,
+            )
+
+            self.assertEqual(existing, {"venv.tar.gz", "jars.zip", "model.tar.gz"})
+            calls = [json.loads(line) for line in log.read_text().splitlines()]
+            self.assertEqual(calls, [[
+                "dfs", "-stat", "%n",
+                "/apps/venv.tar.gz", "/apps/jars.zip", "/apps/model.tar.gz",
+            ]])
+
+    def test_publish_artifacts_uses_the_fingerprint_name_and_batches_checks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            log = root / "hdfs.log"
+            binary = root / "hdfs"
+            binary.write_text(
+                "#!" + sys.executable + "\n"
+                + """
+import json, os, sys
+open(os.environ['HDFS_LOG'], 'a').write(json.dumps(sys.argv[1:]) + '\\n')
+for path in sys.argv[4:]:
+    print(path.rsplit('/', 1)[-1])
+sys.exit(0)
+"""
+            )
+            binary.chmod(0o755)
+            spark_home = root / "spark"
+            jars = spark_home / "jars"
+            jars.mkdir(parents=True)
+            (jars / "one.jar").write_bytes(b"jar")
+            build = root / "build"
+            build.mkdir()
+            task = root / "pack-test"
+            task.mkdir()
+            venv_archive = build / "pyspark_venv-fingerprint.tar.gz"
+            venv_archive.write_bytes(b"venv")
+            environment = dict(
+                os.environ,
+                HDFS_LOG=str(log),
+                PATH=str(root) + os.pathsep + os.environ["PATH"],
+                SPARK_HOME=str(spark_home),
+            )
+
+            archives, extra_conf, model_spec = artifacts.publish_artifacts(
+                "chunk", "/apps", venv_archive, None, None,
+                build, task, environment,
+            )
+
+            self.assertEqual(
+                archives, "hdfs:///apps/pyspark_venv-fingerprint.tar.gz#environment",
+            )
+            self.assertEqual(len(extra_conf), 1)
+            self.assertTrue(extra_conf[0].startswith("spark.yarn.archive=hdfs:///apps/spark-libs-"))
+            self.assertIsNone(model_spec)
+            calls = [json.loads(line) for line in log.read_text().splitlines()]
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][:3], ["dfs", "-stat", "%n"])
+            self.assertEqual(calls[0][3], "/apps/pyspark_venv-fingerprint.tar.gz")
 
     def test_unset_or_empty_use_hdfs_cache_means_enabled(self):
         self.assertTrue(artifacts.hdfs_enabled({}))

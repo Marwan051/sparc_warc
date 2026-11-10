@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Literal, TypedDict, Unpack, overload
 
@@ -95,6 +96,14 @@ BOOLEAN_OPTIONS = {
 
 def _exit_code(returncode):
     return 128 - returncode if returncode < 0 else returncode
+
+
+def _log_timing(label, started):
+    print(
+        f"[launcher] {label}: {time.perf_counter() - started:.2f}s",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def _directory(value):
@@ -272,28 +281,40 @@ def run(arguments):
     build_dir.mkdir(exist_ok=True)
     task_tmp = Path(tempfile.mkdtemp(prefix="pack-", dir=build_dir))
     try:
+        setup_started = time.perf_counter()
+        started = time.perf_counter()
         project_zip = task_tmp / "project_code.zip"
         artifacts.write_project_zip(PROJECT_ROOT, project_zip)
+        _log_timing("project zip", started)
 
         model_archive = None
         model_fingerprint = None
         if stage == "embed":
+            started = time.perf_counter()
             source = artifacts.model_source(PROJECT_ROOT, settings)
             environ["EMBEDDING_MODEL_DIR"] = str(source)
             model_fingerprint, model_archive = artifacts.ensure_model_archive(
                 source, build_dir, task_tmp, environ,
             )
+            _log_timing("model archive", started)
+            started = time.perf_counter()
             artifacts.check_embedding_imports(venv, environ)
+            _log_timing("embedding import check", started)
 
+        started = time.perf_counter()
         fingerprint = artifacts.venv_fingerprint(
             stage, venv, PROJECT_ROOT, environ,
         )
+        _log_timing("venv fingerprint", started)
+        started = time.perf_counter()
         venv_archive = artifacts.ensure_venv_archive(
             venv, fingerprint, build_dir, task_tmp, environ,
         )
+        _log_timing("venv archive", started)
 
         # The shell expands the default path even when HDFS is disabled.
         apps_dir = artifacts.hdfs_apps_dir(settings)
+        started = time.perf_counter()
         if artifacts.hdfs_enabled(settings):
             archives, extra_conf, model_spec = artifacts.publish_artifacts(
                 stage, apps_dir, venv_archive, model_archive, model_fingerprint,
@@ -303,6 +324,7 @@ def run(arguments):
             archives, extra_conf, model_spec = (
                 f"{venv_archive}#environment", (), None,
             )
+        _log_timing("publish artifacts", started)
         if stage == "embed":
             if model_spec is None:
                 model_spec = f"{model_archive}#embedding-model"
@@ -323,7 +345,10 @@ def run(arguments):
             extra_conf=extra_conf,
         )
         command = spark.submit_command(plan, environ)
+        _log_timing("pre-spark setup", setup_started)
+        started = time.perf_counter()
         completed = subprocess.run(command, cwd=PROJECT_ROOT, env=environ)
+        _log_timing("spark-submit", started)
         return _exit_code(completed.returncode)
     finally:
         shutil.rmtree(task_tmp, ignore_errors=True)

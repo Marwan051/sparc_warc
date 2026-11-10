@@ -7,7 +7,7 @@ from contextlib import closing
 from dataclasses import asdict
 from db import analyses
 from jobs.batching import batch_tasks, run_waves, check_result_size
-from jobs.runtime import config, processing_session, report, cli
+from jobs.runtime import config, processing_session, report, report_summary, cli
 from tagging.contracts import AnalysisRequest
 
 _BACKENDS = {}
@@ -41,9 +41,11 @@ def run(argv=None):
     if cfg["dry_run"]:
         report(cfg)
         return 0
+    processed = Counter()
     with processing_session("tag", cfg) as (conn, spark):
         def commit(result):
             analyses.commit_batch(conn, cfg, result["batch_id"], result["outcomes"])
+            processed.update(o["status"].lower() for o in result["outcomes"])
             report(dict(Counter(o["status"].lower() for o in result["outcomes"]),
                         batch_id=result["batch_id"], committed=len(result["outcomes"])))
         with closing(analyses.iter_pending(cfg, cfg["analysis_limit"], cfg["retry_errors"])) as source:
@@ -51,10 +53,15 @@ def run(argv=None):
                 "items": batch, "batch_id": uuid.uuid4().hex,
                 "backend": cfg["backend"], "model": cfg["model"], "result_bytes": cfg["result_bytes"]})
             _, quota = run_waves(spark, tasks, process_batch, commit, cfg["parallel_tasks"])
-        report(dict(analyses.counts(conn, cfg), quota_exhausted=quota))
-        if cfg["export_json"]:
-            analyses.export_json(cfg, cfg["export_json"])
-        return 2 if quota else 0
+        totals = analyses.counts(conn, cfg)
+    processed_summary = {"chunks": sum(processed.values())}
+    for status in ("success", "noise", "error"):
+        processed_summary[status] = processed.get(status, 0)
+    report_summary("tag", processed_summary, cfg["analysis_limit"], "chunks", totals,
+                   quota_exhausted=quota)
+    if cfg["export_json"]:
+        analyses.export_json(cfg, cfg["export_json"])
+    return 2 if quota else 0
 
 
 def main():

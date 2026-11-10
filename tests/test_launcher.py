@@ -132,7 +132,8 @@ class LauncherTests(unittest.TestCase):
             USE_HDFS_CACHE="0",
         )
         for name in ("DRY_RUN", "SPARK_EXECUTOR_INSTANCES", "YEAR", "MONTH",
-                     "NUM_FILES", "MAX_ACCEPTED_ARTICLES"):
+                     "NUM_FILES", "MAX_ACCEPTED_ARTICLES", "CHUNK_DOCUMENT_LIMIT",
+                     "TAG_ANALYSIS_LIMIT", "EMBEDDING_LIMIT"):
             environment.pop(name, None)
         cases = {
             "ingest": ["--dry-run", "--no-progress", "--max-accepted-articles", "17"],

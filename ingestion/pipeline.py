@@ -19,7 +19,7 @@ import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
-from jobs.runtime import start_spark
+from jobs.runtime import report_summary, start_spark
 from jobs.batching import execute_batch
 from jobs.validation import integer, env_int
 
@@ -503,7 +503,31 @@ def restore_run_config(config, run):
     return config
 
 
-def _summary(run_id, config, conn):
+def _ingest_totals(conn):
+    """Return cheap cumulative ingestion totals.
+
+    Exact ``count(*)`` over a multi-million-row ``pages`` table can take
+    minutes on the production host.  The run ledger is exact for rows inserted
+    by ingestion; the live-page partial index gives a cheap estimate.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT coalesce(sum(inserted_count), 0), count(*) FROM ingest_runs"
+        )
+        articles, runs = cur.fetchone()
+        cur.execute(
+            "SELECT reltuples::bigint FROM pg_class WHERE relname = 'idx_pages_live'"
+        )
+        row = cur.fetchone()
+    live_articles = int(row[0]) if row and row[0] and row[0] > 0 else 0
+    return {
+        "articles": int(articles),
+        "live_articles": live_articles,
+        "runs": int(runs),
+    }
+
+
+def _summary(run_id, config, conn, invocation_articles=0):
     run = load_run(run_id, conn=conn)
     print(f"Run {run_id}: {run['status']}; committed {run['inserted_count']:,}/"
           f"{run['target_articles'] or 'unlimited'} new articles")
@@ -523,8 +547,19 @@ def _summary(run_id, config, conn):
                     if isinstance(value, (int, float)) and key not in ("worker_pid", "python_peak_rss_mib", "attempts"):
                         totals[key] = totals.get(key, 0) + value
         print("Counters: " + json.dumps(totals, sort_keys=True))
-    conn.rollback()
+    limit = run["target_articles"] or None
     print(f"Resume command: RESUME_RUN_ID={run_id} python -m jobs.launcher ingest")
+    report_summary(
+        "ingest",
+        {"articles": run["inserted_count"]},
+        limit,
+        "articles",
+        _ingest_totals(conn),
+        invocation_articles=invocation_articles,
+        run_id=run_id,
+        status=run["status"],
+    )
+    conn.rollback()
 
 
 def run_streaming_pipeline(argv=None):
@@ -562,6 +597,7 @@ def run_streaming_pipeline(argv=None):
                                      0, not config["no_progress"])
         print(f"Resume command: RESUME_RUN_ID={run_id} python -m jobs.launcher ingest")
         wave = 0
+        invocation_inserted = 0
         invocation = uuid.uuid4().hex
         # Consecutive waves that produced zero commits AND had failed results
         # (-- tolerate a flaky CommonCrawl endpoint: a transient per-file error
@@ -594,7 +630,7 @@ def run_streaming_pipeline(argv=None):
                 failed = bool(failed_files)
                 status = "failed" if failed else ("complete" if reached or not run["target_articles"] else "shortfall")
                 finish_run(run_id, status, conn=lock_conn)
-                _summary(run_id, config, lock_conn)
+                _summary(run_id, config, lock_conn, invocation_inserted)
                 return {"complete": 0, "failed": 1, "shortfall": 2}[status]
             if spark is None:
                 spark = get_spark_session()
@@ -619,6 +655,7 @@ def run_streaming_pipeline(argv=None):
                         _sleep_backoff(attempt)
                         lock_conn = acquire_coordinator_lock(config["manifest_id"])
                 wave_inserted += inserted
+            invocation_inserted += wave_inserted
             if not config["no_progress"]:
                 current = load_run(run_id, conn=lock_conn)
                 wave_msg = (f"Wave {wave}: committed {current['inserted_count']:,}/"
@@ -639,7 +676,7 @@ def run_streaming_pipeline(argv=None):
                 blank_failed_waves += 1
                 if blank_failed_waves >= 3:
                     finish_run(run_id, "failed", conn=lock_conn)
-                    _summary(run_id, config, lock_conn)
+                    _summary(run_id, config, lock_conn, invocation_inserted)
                     return 1
             else:
                 blank_failed_waves = 0

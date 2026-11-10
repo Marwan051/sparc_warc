@@ -83,6 +83,20 @@ class BatchTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn('"dry_run": true', result.stdout)
 
+    def test_limit_env_fallbacks_and_zero(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertIsNone(config('chunk', [])['document_limit'])
+            self.assertEqual(config('chunk', ['--document-limit', '3'])['document_limit'], 3)
+            self.assertIsNone(config('chunk', ['--document-limit', '0'])['document_limit'])
+        with patch.dict(os.environ, {'CHUNK_DOCUMENT_LIMIT': '4'}, clear=True):
+            self.assertEqual(config('chunk', [])['document_limit'], 4)
+            self.assertEqual(config('chunk', ['--document-limit', '2'])['document_limit'], 2)
+            self.assertIsNone(config('chunk', ['--document-limit', '0'])['document_limit'])
+        with patch.dict(os.environ, {'TAG_ANALYSIS_LIMIT': '0'}, clear=True):
+            self.assertIsNone(config('tag', [])['analysis_limit'])
+        with patch.dict(os.environ, {'EMBEDDING_LIMIT': '6'}, clear=True):
+            self.assertEqual(config('embed', [])['embedding_limit'], 6)
+
 
 @unittest.skipUnless(importlib.util.find_spec('langchain_text_splitters'), 'install requirements/rag.txt')
 class ChunkTests(unittest.TestCase):

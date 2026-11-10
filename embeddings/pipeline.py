@@ -6,7 +6,7 @@ from contextlib import closing
 from db import embeddings as embedding_store
 from embeddings.embeddings import model_version
 from jobs.batching import batch_tasks, run_waves, check_result_size
-from jobs.runtime import cli, config, report, processing_session
+from jobs.runtime import cli, config, report, report_summary, processing_session
 
 
 def process_batch(task):
@@ -34,17 +34,20 @@ def run(argv=None):
         return 0
     cfg["embedding_model"] = cfg.pop("model")
     cfg["embedding_version"] = model_version(cfg["max_length"])
+    processed = {"chunks": 0}
     with processing_session("embed", cfg) as (conn, spark):
         def commit(result):
             embedding_store.commit_batch(conn, cfg, result["rows"])
+            processed["chunks"] += len(result["rows"])
             report({"committed": len(result["rows"])})
         with closing(embedding_store.iter_pending(cfg, cfg["embedding_limit"])) as source:
             tasks = batch_tasks(source, cfg, lambda batch: {
                 "items": batch, "max_length": cfg["max_length"], "result_bytes": cfg["result_bytes"]})
             run_waves(spark, tasks, process_batch, commit, cfg["parallel_tasks"])
-        report(dict(embedding_store.counts(conn, cfg), embedding_model=cfg["embedding_model"],
-                    embedding_version=cfg["embedding_version"]))
-        return 0
+        totals = dict(embedding_store.counts(conn, cfg), embedding_model=cfg["embedding_model"],
+                      embedding_version=cfg["embedding_version"])
+    report_summary("embed", processed, cfg["embedding_limit"], "chunks", totals)
+    return 0
 
 
 def main():

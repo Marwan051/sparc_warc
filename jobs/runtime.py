@@ -6,7 +6,7 @@ import os
 import sys
 from contextlib import contextmanager
 
-from jobs.validation import env_int, positive_int
+from jobs.validation import env_int, non_negative_int, positive_int
 
 
 positive = positive_int  # Compatibility for existing runtime imports.
@@ -43,17 +43,17 @@ def config(stage, argv=None):
     parser.add_argument("--input-bytes", type=positive)
     parser.add_argument("--result-bytes", type=positive)
     if stage == "chunk":
-        parser.add_argument("--document-limit", type=positive)
+        parser.add_argument("--document-limit", type=non_negative_int)
     else:
         if stage == "tag":
-            parser.add_argument("--analysis-limit", type=positive)
+            parser.add_argument("--analysis-limit", type=non_negative_int)
             parser.add_argument("--retry-errors", action="store_true")
             parser.add_argument("--backend")
             parser.add_argument("--model")
             parser.add_argument("--analysis-version")
             parser.add_argument("--export-json")
         else:
-            parser.add_argument("--embedding-limit", type=positive)
+            parser.add_argument("--embedding-limit", type=non_negative_int)
             parser.add_argument("--model")
             parser.add_argument("--max-length", type=positive)
             parser.add_argument("--embedding-batch-size", type=positive)
@@ -73,6 +73,17 @@ def config(stage, argv=None):
     ):
         if result[field] is None:
             result[field] = env_int(environment, default, minimum=1)
+    limits = {
+        "chunk": ("document_limit", "CHUNK_DOCUMENT_LIMIT"),
+        "tag": ("analysis_limit", "TAG_ANALYSIS_LIMIT"),
+        "embed": ("embedding_limit", "EMBEDDING_LIMIT"),
+    }
+    if stage in limits:
+        field, environment = limits[stage]
+        if result[field] is None:
+            result[field] = env_int(environment, 0, minimum=0)
+        if result[field] == 0:
+            result[field] = None
     if stage == "tag":
         result["backend"] = result["backend"] or os.environ.get("TAGGING_BACKEND", "groq")
         if result["backend"] != "groq" and result["model"] is None and not os.environ.get("TAGGING_MODEL"):
@@ -142,3 +153,24 @@ def cli(run):
 
 def report(values):
     print(json.dumps(values, sort_keys=True), flush=True)
+
+
+def report_summary(stage, processed, limit, unit, totals, **extra):
+    """Print this run's work plus the cumulative totals at phase completion."""
+    reached = limit is not None and processed[unit] >= limit
+    summary = {
+        "phase": stage,
+        "processed": processed,
+        "limit": limit,
+        "limit_reached": reached,
+        "totals": totals,
+        **extra,
+    }
+    details = ", ".join(f"{value:,} {name}" for name, value in processed.items())
+    limit_text = f"{limit:,}" if limit is not None else "unlimited"
+    print(
+        f"PHASE SUMMARY {stage}: {details}; limit={limit_text}"
+        f"{' (reached)' if reached else ''}",
+        flush=True,
+    )
+    report(summary)

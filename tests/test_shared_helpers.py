@@ -2,13 +2,15 @@
 
 import argparse
 import importlib.util
+import io
+import json
 import os
 import unittest
-from contextlib import ExitStack
+from contextlib import ExitStack, redirect_stdout
 from unittest.mock import MagicMock, Mock, patch
 
 from jobs.batching import batch_tasks, check_result_size, serialized_size
-from jobs.validation import env_int, integer, positive_int
+from jobs.validation import env_int, integer, non_negative_int, positive_int
 
 
 class ValidationTests(unittest.TestCase):
@@ -31,6 +33,136 @@ class ValidationTests(unittest.TestCase):
                 with self.subTest(raw=raw), patch.dict(os.environ, {"COUNT": raw}):
                     with self.assertRaisesRegex(ValueError, "COUNT"):
                         env_int("COUNT", 3, minimum=1)
+
+    def test_non_negative_target_limits(self):
+        self.assertEqual(non_negative_int("0"), 0)
+        self.assertEqual(non_negative_int(" 2 "), 2)
+        for raw in ("", "abc", "1.5", "-1"):
+            with self.subTest(raw=raw), self.assertRaises(argparse.ArgumentTypeError):
+                non_negative_int(raw)
+
+
+class SummaryTests(unittest.TestCase):
+    def test_phase_summary_prints_run_limit_and_totals(self):
+        from jobs.runtime import report_summary
+        stream = io.StringIO()
+        with redirect_stdout(stream):
+            report_summary("chunk", {"documents": 2, "chunks": 5}, 2, "documents",
+                           {"documents": 9, "stored": 20, "filtered": 1})
+        lines = stream.getvalue().splitlines()
+        self.assertIn("PHASE SUMMARY chunk", lines[0])
+        self.assertIn("2 documents", lines[0])
+        self.assertIn("limit=2 (reached)", lines[0])
+        payload = json.loads(lines[1])
+        self.assertEqual(payload["processed"], {"documents": 2, "chunks": 5})
+        self.assertEqual(payload["totals"], {"documents": 9, "stored": 20, "filtered": 1})
+        self.assertTrue(payload["limit_reached"])
+
+    def test_unlimited_phase_summary(self):
+        from jobs.runtime import report_summary
+        stream = io.StringIO()
+        with redirect_stdout(stream):
+            report_summary("embed", {"chunks": 0}, None, "chunks", {})
+        lines = stream.getvalue().splitlines()
+        self.assertIn("limit=unlimited", lines[0])
+        payload = json.loads(lines[1])
+        self.assertIsNone(payload["limit"])
+        self.assertFalse(payload["limit_reached"])
+
+
+class PipelineSummaryTests(unittest.TestCase):
+    def test_ingest_summary_counts_run_articles_and_db_totals(self):
+        from ingestion import pipeline
+        run = {
+            "run_id": "run-1", "status": "complete",
+            "inserted_count": 3, "target_articles": 5,
+        }
+        files = [{
+            "file_url": "file-1", "inserted_count": 3,
+            "status": "complete", "last_error": None,
+        }]
+        stats = MagicMock()
+        stats.__enter__.return_value = stats
+        stats.fetchmany.side_effect = [[({"accepted": 4},)], []]
+        totals = MagicMock()
+        totals.__enter__.return_value = totals
+        totals.fetchone.side_effect = [(10, 4), (9,)]
+        conn = MagicMock()
+        conn.cursor.side_effect = (
+            lambda *args, **kwargs: stats if kwargs.get("name") else totals
+        )
+        stream = io.StringIO()
+        with redirect_stdout(stream), \
+                patch.object(pipeline, "load_run", return_value=run), \
+                patch.object(pipeline, "load_run_files", return_value=files), \
+                patch.object(pipeline, "report_summary") as summary:
+            pipeline._summary("run-1", {}, conn, invocation_articles=2)
+
+        summary.assert_called_once_with(
+            "ingest", {"articles": 3}, 5, "articles",
+            {"articles": 10, "live_articles": 9, "runs": 4},
+            invocation_articles=2, run_id="run-1", status="complete",
+        )
+        conn.rollback.assert_called_once()
+        self.assertIn("Counters:", stream.getvalue())
+
+    def test_chunk_summary_counts_documents_and_chunks(self):
+        from chunking import pipeline
+        cfg = {"dry_run": False, "chunking_version": "v1", "document_limit": 2,
+               "items_per_task": 1, "input_bytes": 1000, "result_bytes": 1000,
+               "parallel_tasks": 1}
+        session = MagicMock()
+        session.__enter__.return_value = (Mock(), Mock())
+        source = Mock()
+        def execute(spark, tasks, worker, commit, parallelism):
+            commit({"documents": [
+                {"page_id": 1, "chunks": [{"chunk_index": 0}]},
+                {"page_id": 2, "chunks": [{"chunk_index": 0}, {"chunk_index": 1}]},
+            ]})
+            return 1, False
+        with patch.object(pipeline, "config", return_value=cfg), \
+                patch.object(pipeline, "processing_session", return_value=session), \
+                patch.object(pipeline.chunks, "iter_pending_documents", return_value=source), \
+                patch.object(pipeline.chunks, "commit_document"), \
+                patch.object(pipeline.chunks, "counts", return_value={"documents": 2}), \
+                patch.object(pipeline, "batch_tasks", return_value=iter(())), \
+                patch.object(pipeline, "report"), \
+                patch.object(pipeline, "report_summary") as summary, \
+                patch.object(pipeline, "run_waves", side_effect=execute):
+            self.assertEqual(pipeline.run([]), 0)
+        summary.assert_called_once_with(
+            "chunk", {"documents": 2, "chunks": 3}, 2, "documents",
+            {"documents": 2},
+        )
+
+    @unittest.skipUnless(importlib.util.find_spec("pgvector"), "install embedding dependencies")
+    def test_embed_summary_counts_chunks(self):
+        from embeddings import pipeline
+        cfg = {"dry_run": False, "chunking_version": "v1", "embedding_limit": 4,
+               "items_per_task": 1, "input_bytes": 1000, "result_bytes": 1000,
+               "parallel_tasks": 1, "max_length": 256, "model": "m",
+               "embedding_batch_size": 1}
+        session = MagicMock()
+        session.__enter__.return_value = (Mock(), Mock())
+        source = Mock()
+        def execute(spark, tasks, worker, commit, parallelism):
+            commit({"rows": [{"page_id": 1}, {"page_id": 2}]})
+            return 1, False
+        with patch.object(pipeline, "config", return_value=cfg), \
+                patch.object(pipeline, "model_version", return_value="v1"), \
+                patch.object(pipeline, "processing_session", return_value=session), \
+                patch.object(pipeline.embedding_store, "iter_pending", return_value=source), \
+                patch.object(pipeline.embedding_store, "commit_batch"), \
+                patch.object(pipeline.embedding_store, "counts", return_value={"eligible": 4}), \
+                patch.object(pipeline, "batch_tasks", return_value=iter(())), \
+                patch.object(pipeline, "report"), \
+                patch.object(pipeline, "report_summary") as summary, \
+                patch.object(pipeline, "run_waves", side_effect=execute):
+            self.assertEqual(pipeline.run([]), 0)
+        summary.assert_called_once_with(
+            "embed", {"chunks": 2}, 4, "chunks",
+            {"eligible": 4, "embedding_model": "m", "embedding_version": "v1"},
+        )
 
 
 class TaskTests(unittest.TestCase):
@@ -142,7 +274,7 @@ class ResourceTests(unittest.TestCase):
         from chunking import pipeline as chunk
         from tagging import pipeline as tag
         modules = [chunk, tag]
-        if importlib.util.find_spec("numpy"):
+        if importlib.util.find_spec("numpy") and importlib.util.find_spec("pgvector"):
             from embeddings import pipeline as embed
             modules.append(embed)
         for module in modules:
@@ -164,14 +296,22 @@ class ResourceTests(unittest.TestCase):
         submitted = []
         def execute(spark, tasks, worker, commit, parallelism):
             submitted.extend(tasks)
+            commit({"batch_id": "batch", "outcomes": [
+                {"status": "SUCCESS"}, {"status": "ERROR"}]})
             return 2, True
         with patch.object(pipeline, "config", return_value=cfg), \
                 patch.object(pipeline, "processing_session", return_value=session), \
                 patch.object(pipeline.analyses, "iter_pending", return_value=source), \
                 patch.object(pipeline.analyses, "counts", return_value={}), \
+                patch.object(pipeline.analyses, "commit_batch"), \
                 patch.object(pipeline, "report"), \
+                patch.object(pipeline, "report_summary") as summary, \
                 patch.object(pipeline, "run_waves", side_effect=execute):
             self.assertEqual(pipeline.run([]), 2)
         self.assertEqual(len({task["batch_id"] for task in submitted}), 2)
         for task in submitted:
             self.assertEqual((task["backend"], task["model"], task["result_bytes"]), ("fake", "m", 1000))
+        summary.assert_called_once_with(
+            "tag", {"chunks": 2, "success": 1, "noise": 0, "error": 1},
+            None, "chunks", {}, quota_exhausted=True,
+        )

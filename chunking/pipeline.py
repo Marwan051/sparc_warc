@@ -4,7 +4,7 @@ import hashlib
 from contextlib import closing
 from db import chunks
 from jobs.batching import batch_tasks, run_waves, check_result_size
-from jobs.runtime import config, processing_session, report, cli
+from jobs.runtime import config, processing_session, report, report_summary, cli
 
 
 def process_batch(task):
@@ -34,18 +34,24 @@ def run(argv=None):
     if cfg["dry_run"]:
         report(cfg)
         return 0
+    processed = {"documents": 0, "chunks": 0}
     with processing_session("chunk", cfg) as (conn, spark):
         def commit(result):
             for document in result["documents"]:
                 chunks.commit_document(conn, cfg["chunking_version"], document)
-            report({"committed_documents": len(result["documents"]),
-                    "committed_chunks": sum(len(d["chunks"]) for d in result["documents"])})
+            committed_documents = len(result["documents"])
+            committed_chunks = sum(len(d["chunks"]) for d in result["documents"])
+            processed["documents"] += committed_documents
+            processed["chunks"] += committed_chunks
+            report({"committed_documents": committed_documents,
+                    "committed_chunks": committed_chunks})
         with closing(chunks.iter_pending_documents(conn, cfg["chunking_version"], cfg["document_limit"])) as source:
             tasks = batch_tasks(source, cfg, lambda batch: {
                 "items": batch, "result_bytes": cfg["result_bytes"]})
             run_waves(spark, tasks, process_batch, commit, cfg["parallel_tasks"])
-        report(chunks.counts(conn, cfg["chunking_version"]))
-        return 0
+        totals = chunks.counts(conn, cfg["chunking_version"])
+    report_summary("chunk", processed, cfg["document_limit"], "documents", totals)
+    return 0
 
 
 def main():

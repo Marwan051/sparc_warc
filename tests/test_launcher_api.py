@@ -35,6 +35,12 @@ class LauncherApiTests(unittest.TestCase):
 
         run.assert_called_once_with(["tag", "--analysis-limit", "5"])
 
+    def test_embedding_limit_maps_to_flag(self):
+        with patch.object(launcher, "run", return_value=0) as run:
+            launcher.launch("embed", embedding_limit=5)
+
+        run.assert_called_once_with(["embed", "--embedding-limit", "5"])
+
     def test_success_returns_zero(self):
         with patch.object(launcher, "run", return_value=0):
             self.assertEqual(launcher.launch("chunk", document_limit=2), 0)

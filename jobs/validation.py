@@ -23,3 +23,10 @@ def positive_int(value):
         return integer(value, name="value", minimum=1)
     except ValueError as error:
         raise argparse.ArgumentTypeError(str(error)) from error
+
+
+def non_negative_int(value):
+    try:
+        return integer(value, name="value", minimum=0)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error

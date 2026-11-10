@@ -31,7 +31,7 @@ def iter_pending_documents(conn, version, limit=None):
         cur.execute("""SELECT p.id, c.cleaned_text, p.url, m.title, m.language
             FROM pages p JOIN content c ON c.page_id=p.id
             LEFT JOIN metadata m ON m.page_id=p.id
-            WHERE c.cleaned_text IS NOT NULL AND NOT EXISTS (
+            WHERE p.duplicate_of IS NULL AND c.cleaned_text IS NOT NULL AND NOT EXISTS (
                 SELECT 1 FROM chunk_materializations r
                 WHERE r.page_id=p.id AND r.chunking_version=%s)
             ORDER BY p.id LIMIT %s""", (version, limit))

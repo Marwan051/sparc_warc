@@ -159,11 +159,11 @@ def _transient(error):
 
 def _cc_endpoint_alive(file_url):
     """Cheap ranged probe: is data.commoncrawl.org serving this object again?"""
-    request = urllib.request.Request(
-        file_url,
-        headers={"User-Agent": "spark-warc/2", "Range": "bytes=0-4095"},
-    )
     try:
+        request = urllib.request.Request(
+            file_url,
+            headers={"User-Agent": "spark-warc/2", "Range": "bytes=0-4095"},
+        )
         with urllib.request.urlopen(request, timeout=30) as response:
             return 200 <= getattr(response, "status", 200) < 400
     except urllib.error.HTTPError as error:

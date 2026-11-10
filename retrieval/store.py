@@ -14,7 +14,7 @@ from pgvector.psycopg2 import register_vector
 from chunking import CHUNKING_VERSION
 from db.db_handler import get_connection
 from embeddings.embeddings import generate_embeddings, model_version
-from jobs.validation import env_int
+from jobs.validation import env_bool, env_int
 from retrieval.models import SearchQuery, Source
 from retrieval.ranking import rerank_query_groups
 from retrieval.reranker import OnnxReranker
@@ -28,6 +28,9 @@ class RetrievalConfig:
     top_k: int = 5
     candidate_k:int = 20
     max_concurrent_searches: int = 3
+    approximate: bool = False
+    hnsw_ef_search: int = 100
+    hnsw_iterative_scan: str = "relaxed_order"
 
     @classmethod
     def from_environment(cls) -> RetrievalConfig:
@@ -36,13 +39,21 @@ class RetrievalConfig:
         top_k = env_int("TOP_K", 5, minimum=1)
         if candidate_k < top_k:
             raise ValueError("Number of candidates can not be less than the top candidates to get")
+        iterative_scan = os.environ.get("HNSW_ITERATIVE_SCAN", "relaxed_order").strip().lower()
+        if iterative_scan not in {"off", "relaxed_order", "strict_order"}:
+            raise ValueError(
+                "HNSW_ITERATIVE_SCAN must be one of off, relaxed_order, strict_order"
+            )
         return cls(
             chunking_version=os.environ.get("CHUNKING_VERSION", CHUNKING_VERSION),
             embedding_model=os.environ.get("EMBEDDING_MODEL", "BAAI/bge-m3-int8"),
-            embedding_version=os.environ.get("EMBEDDING_VERSION") or model_version(max_length),
+            embedding_version=model_version(max_length),
             top_k=top_k,
             candidate_k=candidate_k,
             max_concurrent_searches=env_int("RAG_DB_CONCURRENCY", 3, minimum=1),
+            approximate=env_bool("RAG_APPROXIMATE_SEARCH", False),
+            hnsw_ef_search=env_int("HNSW_EF_SEARCH", 100, minimum=1),
+            hnsw_iterative_scan=iterative_scan,
         )
 
 
@@ -62,7 +73,7 @@ class SearchHit:
         return f"p{self.page_id}:c{self.chunk_index}"
 
 
-_SEARCH_SQL = """
+_EXACT_SEARCH_SQL = """
 SELECT e.page_id, e.chunk_index, e.text_hash, c.chunk_text,
        1 - (e.embedding <=> %s::vector) AS similarity,
        p.url, m.title, w.domain, a.name, m.language, m.published_date
@@ -77,8 +88,40 @@ WHERE e.chunking_version = %s
   AND e.embedding_model = %s
   AND e.embedding_version = %s
   AND c.eligible
+  AND p.duplicate_of IS NULL
 ORDER BY e.embedding <=> %s::vector, e.page_id, e.chunk_index
 LIMIT %s
+"""
+
+# The index is approximate: a partial HNSW index for the active version lets
+# this CTE use it. The join happens after the LIMIT so only the candidates pay
+# for metadata lookups. `c.eligible` is omitted because only eligible chunks
+# are ever embedded.
+_APPROXIMATE_SEARCH_SQL = """
+WITH candidates AS (
+    SELECT e.page_id, e.chunk_index, e.chunking_version, e.text_hash,
+           e.embedding <=> %s::vector AS distance
+    FROM chunk_embeddings AS e
+    JOIN pages AS live ON live.id = e.page_id
+    WHERE e.chunking_version = %s
+      AND e.embedding_model = %s
+      AND e.embedding_version = %s
+      AND live.duplicate_of IS NULL
+    ORDER BY e.embedding <=> %s::vector
+    LIMIT %s
+)
+SELECT cand.page_id, cand.chunk_index, cand.text_hash, c.chunk_text,
+       1 - cand.distance AS similarity,
+       p.url, m.title, w.domain, a.name, m.language, m.published_date
+FROM candidates AS cand
+JOIN article_chunks AS c
+  USING (page_id, chunking_version, chunk_index)
+JOIN pages AS p ON p.id = cand.page_id
+LEFT JOIN websites AS w ON w.id = p.website_id
+LEFT JOIN authors AS a ON a.id = p.author_id
+LEFT JOIN metadata AS m ON m.page_id = cand.page_id
+WHERE p.duplicate_of IS NULL
+ORDER BY cand.distance, cand.page_id, cand.chunk_index
 """
 
 
@@ -135,14 +178,26 @@ class VectorRetriever:
         try:
             register_vector(conn)
             with conn.cursor() as cur:
-                cur.execute(_SEARCH_SQL, (
+                params = (
                     vector,
                     self.config.chunking_version,
                     self.config.embedding_model,
                     self.config.embedding_version,
                     vector,
                     self.config.candidate_k,
-                ))
+                )
+                if self.config.approximate:
+                    cur.execute(
+                        "SELECT set_config('hnsw.ef_search', %s, true)",
+                        (str(self.config.hnsw_ef_search),),
+                    )
+                    cur.execute(
+                        "SELECT set_config('hnsw.iterative_scan', %s, true)",
+                        (self.config.hnsw_iterative_scan,),
+                    )
+                    cur.execute(_APPROXIMATE_SEARCH_SQL, params)
+                else:
+                    cur.execute(_EXACT_SEARCH_SQL, params)
                 rows = cur.fetchall()
             conn.rollback()
         finally:

@@ -29,18 +29,6 @@ except ImportError:  # pragma: no cover - only for a lean environment
 if load_dotenv is not None:
     load_dotenv(PROJECT_ROOT / ".env")
 
-# The project's normal configuration uses libpq PG* variables, while this
-# checkout's .env uses POSTGRES_* aliases. Bridge them when needed.
-for source, target in (
-    ("POSTGRES_HOST", "PGHOST"),
-    ("POSTGRES_PORT", "PGPORT"),
-    ("POSTGRES_DB", "PGDATABASE"),
-    ("POSTGRES_USER", "PGUSER"),
-    ("POSTGRES_PASSWORD", "PGPASSWORD"),
-):
-    if not os.environ.get(target) and os.environ.get(source):
-        os.environ[target] = os.environ[source]
-
 DEFAULT_MODEL = "BAAI/bge-m3-int8"
 CHUNK_QUERY = """
 WITH ranked AS (
@@ -232,7 +220,8 @@ def main(argv=None) -> int:
     parser.add_argument("--token", default=os.environ.get("MODAL_PROXY_TOKEN"))
     parser.add_argument("--model", default=os.environ.get("MODAL_EMBEDDING_MODEL", "bge-m3-int8"))
     parser.add_argument("--embedding-model", default=DEFAULT_MODEL)
-    parser.add_argument("--embedding-version", default=os.environ.get("EMBEDDING_VERSION"))
+    parser.add_argument("--embedding-version", default=None,
+                        help="explicit stored version to compare; otherwise resolve it from the database")
     parser.add_argument("--languages", default="en,fr,ar")
     parser.add_argument("--per-language", type=int, default=2)
     parser.add_argument("--limit", type=int, default=8)

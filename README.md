@@ -420,8 +420,9 @@ print(result.answer)
 ```
 
 The agent uses `openai/gpt-oss-120b` (override with `RAG_MODEL`) to create at most
-three semantic queries, embeds them in one BGE-M3 batch, and runs exact cosine
-searches concurrently. It runs that model at `RAG_REASONING_EFFORT=medium`: at
+three semantic queries, embeds them in one BGE-M3 batch, and runs cosine
+searches concurrently (exact by default; approximate HNSW is opt-in). It runs
+that model at `RAG_REASONING_EFFORT=medium`: at
 `low`, gpt-oss-120b ignores the answer-language rule and mirrors the evidence's
 language (or drifts to an unrelated one), so `medium` is the lowest setting that
 reliably answers in the question's language.
@@ -456,13 +457,26 @@ there is no silent fallback to cosine-only ranking.
 `RAG_DB_CONCURRENCY` to `3`, with `RERANKER_CANDIDATE_K >= TOP_K` enforced.
 `RERANKER_MODEL_DIR`, `RERANKER_MAX_LENGTH`, `RERANKER_BATCH_SIZE`, and
 `RERANKER_INTRA_OP_THREADS` tune the cross-encoder.
-`RAG_MODEL`, `RAG_PROVIDER`, `RAG_REASONING_EFFORT`, `CHUNKING_VERSION`,
-`EMBEDDING_MODEL`, and `EMBEDDING_VERSION` can override their detected defaults.
+`RAG_MODEL`, `RAG_PROVIDER`, `RAG_REASONING_EFFORT`, `CHUNKING_VERSION`, and
+`EMBEDDING_MODEL` can override their detected defaults. The embedding version is
+always derived from the model files and `EMBEDDING_MAX_LENGTH`; it is not set
+separately.
 The `groq` provider uses strict `json_schema` structured output with
 `openai/gpt-oss-120b`; the `gemini` provider uses `json_schema` with
-`gemini-3.5-flash-lite` (see `requirements/rag-agent.txt`). Exact cosine search intentionally does not use
-the current inner-product HNSW index; a cosine or normalized inner-product HNSW
-retriever can replace the database search later without changing the agent.
+`gemini-3.5-flash-lite` (see `requirements/rag-agent.txt`).
+
+Exact cosine search is the default. Set `RAG_APPROXIMATE_SEARCH=1` to use the
+HNSW path, then create the active-version partial index once:
+
+```bash
+python scripts/ensure_vector_index.py
+# After cutting over to a new version, drop partial indexes for old versions:
+python scripts/ensure_vector_index.py --drop-stale
+```
+
+`HNSW_EF_SEARCH` (default `100`) and `HNSW_ITERATIVE_SCAN` (default
+`relaxed_order`) tune approximate search. The schema's HNSW index uses cosine
+distance, matching the `<=>` operator used by both paths.
 
 `RAG_FETCH_BATCH_SIZE` defaults to 1,000 rows. The eager
 `load_documents_distributed()` helper requires `limit=` or `RAG_DOCUMENT_LIMIT`.

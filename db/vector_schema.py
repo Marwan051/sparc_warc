@@ -19,13 +19,27 @@ CREATE TABLE IF NOT EXISTS chunk_embeddings (
 );
 
 CREATE INDEX IF NOT EXISTS idx_chunk_embeddings_hnsw
-    ON chunk_embeddings USING hnsw (embedding vector_ip_ops);
+    ON chunk_embeddings USING hnsw (embedding vector_cosine_ops);
+"""
+
+# Replace the original inner-product index, which could not serve the cosine
+# operator used by retrieval. Kept as a separate migration so existing
+# databases are repaired without rebuilding the table.
+UPGRADE_V6 = """
+DROP INDEX IF EXISTS idx_chunk_embeddings_hnsw;
+CREATE INDEX idx_chunk_embeddings_hnsw
+    ON chunk_embeddings USING hnsw (embedding vector_cosine_ops);
 """
 
 # Upgrade databases that already applied schema v4. Existing vectors have no
 # reproducible model configuration, so preserve them under an explicit legacy ID.
-UPGRADE_V5 = """
+# The column addition and the primary-key swap are separate so a database that
+# already has the column does not rebuild its primary-key index needlessly.
+ADD_VERSION_COLUMN_V5 = """
 ALTER TABLE chunk_embeddings ADD COLUMN IF NOT EXISTS embedding_version TEXT NOT NULL DEFAULT 'legacy-v0';
+"""
+
+UPGRADE_V5 = """
 ALTER TABLE chunk_embeddings DROP CONSTRAINT IF EXISTS chunk_embeddings_pkey;
 ALTER TABLE chunk_embeddings ADD CONSTRAINT chunk_embeddings_pkey
     PRIMARY KEY (page_id, chunking_version, chunk_index, embedding_model, embedding_version);

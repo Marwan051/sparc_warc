@@ -203,5 +203,6 @@ configured.
 - Semantic near-duplicate detection, reranking, or grounding models.
 - LangGraph or durable workflow checkpoints.
 - Public authentication implementation and deployment-specific rate limiting.
-- HNSW retrieval until corpus size and latency measurements justify approximate
-  search.
+- Approximate HNSW retrieval by default; it is implemented behind
+  `RAG_APPROXIMATE_SEARCH` until corpus-size and recall measurements justify making
+  it the default.

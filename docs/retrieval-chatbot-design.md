@@ -175,10 +175,11 @@ maximum concurrent DB searches:  3
 embedding inference concurrency: 1 batch per process
 ```
 
-The initial implementation uses exhaustive `vector <=> query_vector` ordering.
-The schema's existing `vector_ip_ops` HNSW index remains untouched but is not used
-by this exact cosine query. Switching to approximate indexed retrieval is confined
-to the retrieval store.
+The default implementation uses exhaustive `vector <=> query_vector` ordering.
+The schema's HNSW index now uses `vector_cosine_ops`, matching that operator.
+Set `RAG_APPROXIMATE_SEARCH=1` after creating the active-version partial index
+(`scripts/ensure_vector_index.py`) to use the indexed CTE path; switching modes is
+confined to the retrieval store.
 
 These limits must be enforced by application code rather than accepted from model
 output. The service also controls `top_k`, timeouts, database filters, and permitted

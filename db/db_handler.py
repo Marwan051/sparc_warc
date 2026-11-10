@@ -185,7 +185,36 @@ def init_db(conn=None):
                 from db.vector_schema import DDL
                 cur.execute(DDL)
                 cur.execute("INSERT INTO ingest_schema_versions(version) VALUES (4)")
-            cur.execute("SELECT 1 FROM ingest_schema_versions WHERE version=5")
+            # Keep this guarded and idempotent: version 5 was never recorded by
+            # the previous code, and a partially applied migration must not be
+            # trusted just because its version row exists.
+            from db.vector_schema import ADD_VERSION_COLUMN_V5, UPGRADE_V5
+            cur.execute(ADD_VERSION_COLUMN_V5)
+            cur.execute("""
+                SELECT pg_get_constraintdef(oid)
+                FROM pg_constraint
+                WHERE conrelid = 'chunk_embeddings'::regclass AND contype = 'p'
+            """)
+            primary_key = cur.fetchone()
+            if primary_key is None or "embedding_version" not in primary_key[0]:
+                cur.execute(UPGRADE_V5)
+            cur.execute("INSERT INTO ingest_schema_versions(version) VALUES (5) ON CONFLICT DO NOTHING")
+            cur.execute("SELECT 1 FROM ingest_schema_versions WHERE version=6")
+            if not cur.fetchone():
+                from db.vector_schema import UPGRADE_V6
+                cur.execute("""
+                    SELECT opc.opcname, i.indisvalid
+                    FROM pg_index i
+                    JOIN pg_class idx ON idx.oid = i.indexrelid
+                    JOIN pg_namespace n ON n.oid = idx.relnamespace
+                    JOIN pg_opclass opc ON opc.oid = i.indclass[0]
+                    WHERE idx.relname = 'idx_chunk_embeddings_hnsw'
+                      AND n.nspname = current_schema()
+                """)
+                index = cur.fetchone()
+                if index is None or index[0] != "vector_cosine_ops" or not index[1]:
+                    cur.execute(UPGRADE_V6)
+                cur.execute("INSERT INTO ingest_schema_versions(version) VALUES (6) ON CONFLICT DO NOTHING")
         conn.commit()
     except Exception:
         conn.rollback()
@@ -266,13 +295,60 @@ def load_run_files(run_id, conn=None):
         return [dict(zip(keys, row)) for row in cur.fetchall()]
 
 
-def _insert_new_records(cur, records):
+DEDUP_MIN_CHARS = 200
+
+
+def _dedup_length(record):
+    length = record.get("char_count")
+    if length is None:
+        length = len(record.get("cleaned_text") or "")
+    return length
+
+
+def _dedup_records(cur, records):
+    """Drop records whose cleaned text is already stored.
+
+    A WARC record id is unique per capture, so recrawls of the same article are
+    distinct rows. The cleaned-text hash is the only stable article identity.
+    Short texts are exempt: navigation fragments and boilerplate can collide
+    without being duplicates.
+    """
+    seen = set()
+    kept = []
+    skipped = 0
+    for record in records:
+        digest = record.get("text_hash")
+        if digest and _dedup_length(record) >= DEDUP_MIN_CHARS:
+            if digest in seen:
+                skipped += 1
+                continue
+            seen.add(digest)
+        kept.append(record)
+    if seen:
+        cur.execute("SELECT text_hash FROM pages WHERE text_hash = ANY(%s)", (sorted(seen),))
+        stored = {row[0] for row in cur.fetchall()}
+        remaining = []
+        for record in kept:
+            digest = record.get("text_hash")
+            if digest in stored and _dedup_length(record) >= DEDUP_MIN_CHARS:
+                skipped += 1
+            else:
+                remaining.append(record)
+        kept = remaining
+    return kept, skipped
+
+
+def _insert_new_records(cur, records, stats=None):
     if not records:
         return []
     unique = {}
     for record in records:
         unique.setdefault(record["record_id"], record)
-    records = list(unique.values())
+    records, duplicates = _dedup_records(cur, list(unique.values()))
+    if not records:
+        if stats is not None and duplicates:
+            stats["duplicate_articles"] = stats.get("duplicate_articles", 0) + duplicates
+        return []
     domains = sorted({extract_domain(r["url"]) for r in records})
     execute_values(cur, "INSERT INTO websites (domain) VALUES %s ON CONFLICT DO NOTHING", [(x,) for x in domains])
     cur.execute("SELECT domain,id FROM websites WHERE domain=ANY(%s)", (domains,))
@@ -312,6 +388,8 @@ def _insert_new_records(cur, records):
             ) for r in new_records])
         execute_values(cur, "INSERT INTO content (page_id,cleaned_text) VALUES %s",
                        [(page_ids[r["record_id"]], r["cleaned_text"]) for r in new_records])
+    if stats is not None and duplicates:
+        stats["duplicate_articles"] = stats.get("duplicate_articles", 0) + duplicates
     return new_records
 
 
@@ -330,21 +408,21 @@ def _write_diagnostic(run_id, chunk_id, rejected):
             os.unlink(temporary)
 
 
-def _insert_isolated(cur, batch, rejected):
+def _insert_isolated(cur, batch, rejected, stats=None):
     cur.execute("SAVEPOINT article_batch")
     try:
         for record in batch:
             parsed = urlparse(record["url"])
             if parsed.scheme not in ("http", "https") or not parsed.hostname:
                 raise ValueError("article URL must be an absolute HTTP(S) URL")
-        inserted = len(_insert_new_records(cur, batch))
+        inserted = len(_insert_new_records(cur, batch, stats))
     except (psycopg2.DataError, psycopg2.IntegrityError, ValueError) as error:
         cur.execute("ROLLBACK TO SAVEPOINT article_batch")
         cur.execute("RELEASE SAVEPOINT article_batch")
         if len(batch) == 1:
             rejected.append({"record": batch[0], "error": str(error)})
             return 0
-        return sum(_insert_isolated(cur, [record], rejected) for record in batch)
+        return sum(_insert_isolated(cur, [record], rejected, stats) for record in batch)
     cur.execute("RELEASE SAVEPOINT article_batch")
     return inserted
 
@@ -385,13 +463,14 @@ def commit_chunk(run_id, result, batch_size=25, conn=None):
                 raise ValueError("chunk exceeded its remaining quota; refusing to discard uncommitted candidates")
             inserted_count = 0
             rejected = []
+            stats = result.setdefault("stats", {})
             for offset in range(0, len(candidates), batch_size):
                 batch = candidates[offset:offset + batch_size]
-                inserted_count += _insert_isolated(cur, batch, rejected)
+                inserted_count += _insert_isolated(cur, batch, rejected, stats)
             if rejected:
-                result.setdefault("stats", {})["invalid_database_rows"] = len(rejected)
+                stats["invalid_database_rows"] = len(rejected)
                 _write_diagnostic(run_id, result["chunk_id"], rejected)
-            result.setdefault("stats", {})["already_saved"] = len(candidates) - inserted_count - len(rejected)
+            stats["already_saved"] = len(candidates) - inserted_count - len(rejected)
             result["stats"]["chunk_duplicates"] = len(result["candidates"]) - len(candidates)
             failure, eof = result.get("error"), bool(result.get("eof"))
             status = "failed" if failure else ("eof" if eof else "pending")

@@ -14,11 +14,13 @@ def identity(config):
 def iter_pending(config, limit=None, retry_errors=False):
     with streaming_cursor("analysis_source", itersize=30, connection_factory=get_connection) as cur:
         cur.execute("""SELECT c.page_id,c.chunk_index,c.chunk_text,m.language,m.title
-            FROM article_chunks c LEFT JOIN metadata m ON m.page_id=c.page_id
+            FROM article_chunks c
+            JOIN pages p ON p.id=c.page_id
+            LEFT JOIN metadata m ON m.page_id=c.page_id
             LEFT JOIN chunk_analyses a ON a.page_id=c.page_id
                 AND a.chunking_version=c.chunking_version AND a.chunk_index=c.chunk_index
                 AND a.backend=%s AND a.model=%s AND a.analysis_version=%s
-            WHERE c.chunking_version=%s AND c.eligible
+            WHERE c.chunking_version=%s AND c.eligible AND p.duplicate_of IS NULL
                 AND (a.status IS NULL OR (%s AND a.status='ERROR'))
             ORDER BY c.page_id,c.chunk_index LIMIT %s""",
             (config["backend"],config["model"],config["analysis_version"],config["chunking_version"],retry_errors,limit))
@@ -47,9 +49,16 @@ def commit_batch(conn, config, batch_id, outcomes):
 
 def counts(conn, config):
     with conn.cursor() as cur:
-        cur.execute("SELECT status,count(*) FROM chunk_analyses WHERE chunking_version=%s AND backend=%s AND model=%s AND analysis_version=%s GROUP BY status", identity(config))
+        cur.execute("""SELECT a.status,count(*) FROM chunk_analyses a
+            JOIN pages p ON p.id=a.page_id
+            WHERE a.chunking_version=%s AND a.backend=%s AND a.model=%s AND a.analysis_version=%s
+              AND p.duplicate_of IS NULL
+            GROUP BY a.status""", identity(config))
         result = {status.lower(): count for status, count in cur.fetchall()}
-        cur.execute("SELECT count(*) FROM article_chunks WHERE chunking_version=%s AND eligible", (config["chunking_version"],))
+        cur.execute("""SELECT count(*) FROM article_chunks c
+            JOIN pages p ON p.id=c.page_id
+            WHERE c.chunking_version=%s AND c.eligible AND p.duplicate_of IS NULL""",
+                    (config["chunking_version"],))
         eligible = cur.fetchone()[0]
     conn.commit()
     result["pending"] = eligible - sum(result.values())

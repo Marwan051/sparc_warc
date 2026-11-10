@@ -121,6 +121,41 @@ class StoreTests(unittest.IsolatedAsyncioTestCase):
         sql, params = cursor.execute.call_args.args
         self.assertIn("<=>", sql)
         self.assertIn("c.eligible", sql)
+        self.assertIn("p.duplicate_of IS NULL", sql)
+        self.assertEqual(params[1:4], ("chunks-v1", "model", "model-v1"))
+        conn.rollback.assert_called_once()
+        conn.close.assert_called_once()
+
+    def test_approximate_search_sets_hnsw_and_uses_candidate_cte(self):
+        import numpy as np
+        from retrieval.models import SearchQuery
+        from retrieval.store import RetrievalConfig, VectorRetriever
+        cursor = Mock()
+        cursor.__enter__ = Mock(return_value=cursor)
+        cursor.__exit__ = Mock(return_value=False)
+        cursor.fetchall.return_value = []
+        conn = Mock()
+        conn.cursor.return_value = cursor
+        config = RetrievalConfig(
+            chunking_version="chunks-v1", embedding_model="model",
+            embedding_version="model-v1", top_k=5, candidate_k=20,
+            approximate=True, hnsw_ef_search=250, hnsw_iterative_scan="strict_order",
+        )
+        retriever = VectorRetriever(config, embedder=Mock(), reranker=FakeReranker())
+        vector = np.zeros(1024, dtype=np.float32)
+        with patch("retrieval.store.get_connection", return_value=conn), \
+             patch("retrieval.store.register_vector"):
+            self.assertEqual(retriever._search_one(SearchQuery(id="q", query="query"), vector), [])
+        calls = cursor.execute.call_args_list
+        self.assertIn("set_config('hnsw.ef_search'", calls[0].args[0])
+        self.assertEqual(calls[0].args[1], ("250",))
+        self.assertIn("set_config('hnsw.iterative_scan'", calls[1].args[0])
+        self.assertEqual(calls[1].args[1], ("strict_order",))
+        sql, params = calls[2].args
+        self.assertIn("WITH candidates", sql)
+        self.assertIn("<=>", sql)
+        self.assertNotIn("c.eligible", sql)
+        self.assertIn("p.duplicate_of IS NULL", sql)
         self.assertEqual(params[1:4], ("chunks-v1", "model", "model-v1"))
         conn.rollback.assert_called_once()
         conn.close.assert_called_once()

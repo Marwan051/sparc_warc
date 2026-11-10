@@ -10,7 +10,7 @@ from contextlib import ExitStack, redirect_stdout
 from unittest.mock import MagicMock, Mock, patch
 
 from jobs.batching import batch_tasks, check_result_size, serialized_size
-from jobs.validation import env_int, integer, non_negative_int, positive_int
+from jobs.validation import env_bool, env_int, integer, non_negative_int, positive_int
 
 
 class ValidationTests(unittest.TestCase):
@@ -33,6 +33,19 @@ class ValidationTests(unittest.TestCase):
                 with self.subTest(raw=raw), patch.dict(os.environ, {"COUNT": raw}):
                     with self.assertRaisesRegex(ValueError, "COUNT"):
                         env_int("COUNT", 3, minimum=1)
+
+    def test_boolean_environment_values(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(env_bool("FLAG", False))
+            self.assertTrue(env_bool("FLAG", True))
+        for raw in ("1", "true", "YES", "on"):
+            with self.subTest(raw=raw), patch.dict(os.environ, {"FLAG": raw}):
+                self.assertTrue(env_bool("FLAG"))
+        for raw in ("0", "false", "NO", "off"):
+            with self.subTest(raw=raw), patch.dict(os.environ, {"FLAG": raw}):
+                self.assertFalse(env_bool("FLAG"))
+        with patch.dict(os.environ, {"FLAG": "maybe"}), self.assertRaisesRegex(ValueError, "FLAG"):
+            env_bool("FLAG")
 
     def test_non_negative_target_limits(self):
         self.assertEqual(non_negative_int("0"), 0)

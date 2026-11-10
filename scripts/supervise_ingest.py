@@ -69,11 +69,11 @@ def db_query(query: str, env: dict[str, str]) -> str | None:
     """Run a read-only query through psql; None on failure."""
     try:
         result = subprocess.run(
-            ["psql", "-h", env.get("POSTGRES_HOST", "localhost"),
-             "-U", env.get("POSTGRES_USER", ""),
-             "-d", env.get("POSTGRES_DB", ""),
+            ["psql", "-h", env.get("PGHOST", "localhost"),
+             "-U", env.get("PGUSER", ""),
+             "-d", env.get("PGDATABASE", ""),
              "-X", "-tA", "-c", query],
-            env={**os.environ, "PGPASSWORD": env.get("POSTGRES_PASSWORD", "")},
+            env={**os.environ, "PGPASSWORD": env.get("PGPASSWORD", "")},
             capture_output=True, text=True, timeout=30,
         )
     except (OSError, subprocess.TimeoutExpired):

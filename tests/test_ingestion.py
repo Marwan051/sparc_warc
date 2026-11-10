@@ -411,10 +411,137 @@ class DatabaseTests(unittest.TestCase):
         result = chunk([candidate('a'), candidate('a')])
         self.assertEqual(db.commit_chunk(self.run_id, result), 1)
 
+    def test_duplicate_text_hash_is_skipped_and_counted(self):
+        digest = 'd' * 64
+        first = chunk([candidate('a', text_hash=digest, char_count=1000)])
+        self.assertEqual(db.commit_chunk(self.run_id, first), 1)
+        result = chunk(
+            [candidate('b', text_hash=digest, char_count=1000)],
+            file='file-2', start=0, end=100,
+        )
+        self.assertEqual(db.commit_chunk(self.run_id, result), 0)
+        self.assertEqual(result['stats']['duplicate_articles'], 1)
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute('SELECT count(*), min(warc_record_id) FROM pages')
+            self.assertEqual(cur.fetchone(), (1, 'a'))
+
+    def test_duplicate_text_hash_within_one_batch_is_skipped(self):
+        digest = 'e' * 64
+        result = chunk([
+            candidate('a', text_hash=digest, char_count=1000),
+            candidate('b', text_hash=digest, char_count=1000),
+        ])
+        self.assertEqual(db.commit_chunk(self.run_id, result), 1)
+        self.assertEqual(result['stats']['duplicate_articles'], 1)
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute('SELECT count(*) FROM pages')
+            self.assertEqual(cur.fetchone()[0], 1)
+
+    def test_same_canonical_key_with_different_text_is_an_update(self):
+        result = chunk([
+            candidate('a', canonical_key='https://example.com/news',
+                      text_hash='a' * 64, char_count=1000),
+            candidate('b', canonical_key='https://example.com/news',
+                      text_hash='b' * 64, char_count=1000),
+        ])
+        self.assertEqual(db.commit_chunk(self.run_id, result), 2)
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute('SELECT count(*) FROM pages')
+            self.assertEqual(cur.fetchone()[0], 2)
+
+    def test_short_text_with_same_hash_is_not_deduped(self):
+        digest = 'f' * 64
+        first = chunk([candidate('a', text_hash=digest, char_count=50)])
+        self.assertEqual(db.commit_chunk(self.run_id, first), 1)
+        result = chunk(
+            [candidate('b', text_hash=digest, char_count=50)],
+            file='file-2', start=0, end=100,
+        )
+        self.assertEqual(db.commit_chunk(self.run_id, result), 1)
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute('SELECT count(*) FROM pages')
+            self.assertEqual(cur.fetchone()[0], 2)
+
+    def test_schema_v5_upgrades_legacy_embeddings_table(self):
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute('DROP TABLE chunk_embeddings')
+            cur.execute("""
+                CREATE TABLE chunk_embeddings (
+                    page_id INT NOT NULL,
+                    chunking_version TEXT NOT NULL,
+                    chunk_index INT NOT NULL,
+                    embedding_model TEXT NOT NULL,
+                    text_hash TEXT NOT NULL,
+                    embedding VECTOR(1024) NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (page_id, chunking_version, chunk_index, embedding_model),
+                    FOREIGN KEY (page_id, chunking_version, chunk_index)
+                        REFERENCES article_chunks(page_id, chunking_version, chunk_index)
+                        ON DELETE CASCADE
+                )
+            """)
+            cur.execute('DELETE FROM ingest_schema_versions WHERE version=5')
+            conn.commit()
+        db.init_db()
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute("""
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = 'chunk_embeddings'
+                  AND column_name = 'embedding_version'
+            """)
+            self.assertIsNotNone(cur.fetchone())
+            cur.execute("""
+                SELECT pg_get_constraintdef(oid) FROM pg_constraint
+                WHERE conrelid = 'chunk_embeddings'::regclass AND contype = 'p'
+            """)
+            self.assertIn('embedding_version', cur.fetchone()[0])
+            cur.execute('SELECT 1 FROM ingest_schema_versions WHERE version=5')
+            self.assertIsNotNone(cur.fetchone())
+
+    def test_pending_documents_exclude_marked_duplicates(self):
+        from db import chunks as chunks_db
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO pages(id,url,warc_record_id,text_hash,duplicate_of)
+                VALUES (1,'https://example.com/1','r1','h1',NULL),
+                       (2,'https://example.com/2','r2','h2',1)
+            """)
+            cur.execute("""
+                INSERT INTO content(page_id,cleaned_text)
+                VALUES (1,'live text'), (2,'duplicate text')
+            """)
+            conn.commit()
+        with self.connect() as conn:
+            rows = list(chunks_db.iter_pending_documents(conn, 'test-v1'))
+        self.assertEqual([row["page_id"] for row in rows], [1])
+
+    def test_schema_v6_replaces_inner_product_index(self):
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute('DROP INDEX IF EXISTS idx_chunk_embeddings_hnsw')
+            cur.execute("""
+                CREATE INDEX idx_chunk_embeddings_hnsw
+                ON chunk_embeddings USING hnsw (embedding vector_ip_ops)
+            """)
+            cur.execute('DELETE FROM ingest_schema_versions WHERE version=6')
+            conn.commit()
+        db.init_db()
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute("""
+                SELECT opc.opcname
+                FROM pg_index i
+                JOIN pg_class idx ON idx.oid = i.indexrelid
+                JOIN pg_opclass opc ON opc.oid = i.indclass[0]
+                WHERE idx.relname = 'idx_chunk_embeddings_hnsw'
+            """)
+            self.assertEqual(cur.fetchone()[0], 'vector_cosine_ops')
+            cur.execute('SELECT 1 FROM ingest_schema_versions WHERE version=6')
+            self.assertIsNotNone(cur.fetchone())
+
     def test_content_error_rolls_back_cursor_and_rows(self):
         original = db._insert_new_records
-        def broken(cur, records):
-            original(cur, records)
+        def broken(cur, records, stats=None):
+            original(cur, records, stats)
             raise RuntimeError('simulated write failure')
         with patch.object(db, '_insert_new_records', side_effect=broken), self.assertRaises(RuntimeError):
             db.commit_chunk(self.run_id, chunk())

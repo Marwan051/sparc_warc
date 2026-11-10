@@ -15,7 +15,8 @@ def iter_pending(config, limit=None):
     with streaming_cursor("embedding_source", itersize=25, connection_factory=get_connection) as cur:
         cur.execute("""SELECT c.page_id,c.chunk_index,c.chunk_text,c.text_hash
             FROM article_chunks c
-            WHERE c.chunking_version=%s AND c.eligible
+            JOIN pages p ON p.id=c.page_id
+            WHERE c.chunking_version=%s AND c.eligible AND p.duplicate_of IS NULL
                 AND NOT EXISTS (
                     SELECT 1 FROM chunk_embeddings e
                     WHERE e.page_id=c.page_id
@@ -83,13 +84,17 @@ def commit_batch(conn, config, rows):
 
 def counts(conn, config):
     with conn.cursor() as cur:
-        cur.execute("""SELECT count(*) FROM article_chunks c WHERE c.chunking_version=%s AND c.eligible
-            AND EXISTS (SELECT 1 FROM chunk_embeddings e WHERE e.page_id=c.page_id
+        cur.execute("""SELECT count(*) FROM article_chunks c
+            JOIN pages p ON p.id=c.page_id
+            WHERE c.chunking_version=%s AND c.eligible AND p.duplicate_of IS NULL
+              AND EXISTS (SELECT 1 FROM chunk_embeddings e WHERE e.page_id=c.page_id
                 AND e.chunking_version=c.chunking_version AND e.chunk_index=c.chunk_index
                 AND e.embedding_model=%s AND e.embedding_version=%s)""",
             (config["chunking_version"], config["embedding_model"], config["embedding_version"]))
         embedded = cur.fetchone()[0]
-        cur.execute("SELECT count(*) FROM article_chunks WHERE chunking_version=%s AND eligible",
+        cur.execute("""SELECT count(*) FROM article_chunks c
+            JOIN pages p ON p.id=c.page_id
+            WHERE c.chunking_version=%s AND c.eligible AND p.duplicate_of IS NULL""",
                     (config["chunking_version"],))
         eligible = cur.fetchone()[0]
     conn.commit()

@@ -20,10 +20,14 @@ def read_counts(chunking_version, model, embedding_version):
         with conn.cursor() as cur:
             cur.execute("""SELECT
                 (SELECT count(*) FROM article_chunks c
-                    WHERE c.chunking_version=%s AND c.eligible),
+                    JOIN pages p ON p.id=c.page_id
+                    WHERE c.chunking_version=%s AND c.eligible
+                      AND p.duplicate_of IS NULL),
                 (SELECT count(*) FROM chunk_embeddings e
                     JOIN article_chunks c USING (page_id,chunking_version,chunk_index)
+                    JOIN pages p ON p.id=c.page_id
                     WHERE c.chunking_version=%s AND c.eligible
+                      AND p.duplicate_of IS NULL
                       AND e.embedding_model=%s AND e.embedding_version=%s)""",
                 (chunking_version, chunking_version, model, embedding_version))
             return cur.fetchone()

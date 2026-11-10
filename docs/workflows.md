@@ -14,7 +14,8 @@ import graph in [architecture.md](architecture.md#module-interaction-graph).
 ## 1. End-to-end data flow
 
 The four phases run independently against PostgreSQL; only versioned keys
-(`CHUNKING_VERSION`, `EMBEDDING_MODEL`/`EMBEDDING_VERSION`) connect them.
+(`CHUNKING_VERSION`, `EMBEDDING_MODEL`, and the derived embedding version)
+connect them.
 
 ```mermaid
 flowchart LR
@@ -240,7 +241,7 @@ sequenceDiagram
     A->>R: retrieve(queries)
     R->>R: embed all queries (BGE-M3, one batch)\nvalidate (n, 1024), finite
     par per query (up to RAG_DB_CONCURRENCY threads)
-        R->>DB: exact cosine top-K (candidate_k=20)\njoin source metadata
+        R->>DB: cosine top-K (candidate_k=20)\nexact by default, HNSW opt-in\njoin source metadata
         DB-->>R: rows become SearchHit list
     end
     R->>RK: rerank_query_groups(query, chunk pairs)

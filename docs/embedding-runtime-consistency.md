@@ -94,11 +94,10 @@ It does **not** include:
 - batch size
 - intra-op thread count
 
-`embeddings/pipeline.py` always computes `model_version()` and ignores an
-explicit `EMBEDDING_VERSION`. `retrieval/store.py` *does* honor
-`EMBEDDING_VERSION`. That mismatch must be fixed before continuous operation,
-otherwise the corpus job and the query service can use different vector
-identities, or a runtime change can be written under the same identity.
+Both `embeddings/pipeline.py` and `retrieval/store.py` compute
+`model_version()` from the model files and `EMBEDDING_MAX_LENGTH`.
+`EMBEDDING_VERSION` is no longer an override, so the corpus job and the query
+service cannot drift onto different vector identities.
 
 ---
 
@@ -302,16 +301,13 @@ Suggested environment/config:
 ```bash
 EMBEDDING_BACKEND=modal
 EMBEDDING_RUNTIME_ID=ort-1.30.0-avx2
-# Optional explicit override; leave blank to compute from files + runtime.
-EMBEDDING_VERSION=
 ```
 
 Requirements:
 
-- `embeddings/pipeline.py` must honor an explicit `EMBEDDING_VERSION`, not only
-  `model_version()`.
-- `retrieval/store.py` and `scripts/watch_embeddings.py` must use the same
-  resolution helper.
+- `embeddings/pipeline.py` and `retrieval/store.py` derive the embedding version
+  from `model_version()`; there is no explicit `EMBEDDING_VERSION` override.
+- `scripts/watch_embeddings.py` must use the same resolution helper.
 - The corpus job and query service must use the same `EMBEDDING_RUNTIME_ID`.
 - If the runtime changes, the embedding version changes and the corpus is
   re-embedded under the new identity. Never mix kernels under one version.
@@ -376,7 +372,8 @@ job inside the Modal web container. The Modal endpoint should be stateless.
 1. Freeze the old embedding identity.
 2. Build and validate the wheel.
 3. Deploy the wheel-backed Modal app.
-4. Set the new `EMBEDDING_RUNTIME_ID` / optional `EMBEDDING_VERSION`.
+4. Set the new `EMBEDDING_RUNTIME_ID`; the embedding version follows the model
+   fingerprint automatically.
 5. Backfill the whole corpus under the new identity.
 6. Keep serving the old identity for retrieval while backfill runs.
 7. Switch the query service to the new identity only after the backfill is
@@ -469,8 +466,9 @@ Remaining cleanup after the wheel integration is implemented:
    acceptable.
 3. Should the embedding lock be per-version so a full backfill can run
    alongside hourly ingestion?
-4. Is an explicit `EMBEDDING_VERSION` preferred over automatic model/runtime
-   fingerprinting for operational control?
+4. ~~Is an explicit `EMBEDDING_VERSION` preferred over automatic model/runtime
+   fingerprinting?~~ Resolved: the version is derived automatically so ingestion
+   and retrieval cannot disagree.
 5. Does the product need bitwise reproducibility for tests, or is a
    recall-based tolerance sufficient? The current evidence suggests the latter
    is reasonable, but a full retriever/reranker A/B should confirm it.

@@ -18,6 +18,18 @@ def env_int(name, default, *, minimum=0):
     return integer(os.environ.get(name, str(default)).strip(), name=name, minimum=minimum)
 
 
+def env_bool(name, default=False):
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean, got {value!r}")
+
+
 def positive_int(value):
     try:
         return integer(value, name="value", minimum=1)

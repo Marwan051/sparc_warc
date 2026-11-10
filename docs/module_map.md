@@ -400,7 +400,9 @@ RagResult(question: str, answer: str, sufficient: bool, citations: list[str],
 # retrieval/store.py
 @dataclass(frozen=True)
 RetrievalConfig(chunking_version, embedding_model, embedding_version,
-                top_k=5, candidate_k=20, max_concurrent_searches=3)
+                top_k=5, candidate_k=20, max_concurrent_searches=3,
+                approximate=False, hnsw_ef_search=100,
+                hnsw_iterative_scan="relaxed_order")
 RetrievalConfig.from_environment() -> RetrievalConfig
 @dataclass
 SearchHit(page_id, chunk_index, text_hash, text, similarity, query_id, source,
@@ -450,10 +452,11 @@ async def answer(question: str) -> RagResult         # module-level convenience 
   `agent.py` → `evidence`, `llm`, `models`, `store`; `llm.py`/`models.py` → external only
 - imported by: `retrieval/__init__.py` ← `scripts/ask.py` (lazy)
 - caveats: `ranking.py` mentioning `store`/`reranker` only under `TYPE_CHECKING` is a
-  deliberate cycle breaker (`store` imports `ranking` at module level). The exact
-  cosine search intentionally bypasses the HNSW index so a retriever can be replaced
-  without touching the agent. `RerankerConfig`/`OnnxReranker` formatting style
-  differs from the rest of the package.
+  deliberate cycle breaker (`store` imports `ranking` at module level). Exact cosine
+  search is the default; `RAG_APPROXIMATE_SEARCH=1` selects the partial-HNSW CTE path.
+  A retriever can still be replaced without touching the agent.
+  `RerankerConfig`/`OnnxReranker` formatting style differs from the rest of the
+  package.
 
 ---
 

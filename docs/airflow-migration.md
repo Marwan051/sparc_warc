@@ -1,369 +1,338 @@
-# Airflow migration plan: shell scripts → Python
+# Airflow migration: shell scripts → Python
 
-**Audience:** a developer handling this pipeline for the first time.
-**Size:** roughly 1–2 weeks of focused work for one engineer.
+**Status:** the migration is complete except for retiring the manual supervisor
+(Phase 6), which is deliberately deferred until the DAG has run in production for a
+while. The daily DAG, Python setup/download scripts, and PostgreSQL-backed Airflow
+metadata database are live.
+
+This document records what changed, what was intentionally left out, and how to
+operate the result. For day-to-day commands, the [README runbook](../README.md#airflow-automation)
+is the shorter reference.
 
 ---
 
-## Part 0 — Background: how the project runs today
+## Background
 
-Before touching anything, understand the pieces. If any of this is new, read the
-relevant section twice before starting.
-
-### The pipeline itself (already Python, don't touch)
-
-The product of this project is a searchable database of news articles. Article pages
-arrive as raw HTML inside large compressed archives (WARC files) downloaded from
-Common Crawl. The work is split into four **stages**, and each stage mutates documents
-in turn:
+The product is a searchable database of news articles. HTML pages arrive in large
+compressed WARC archives from Common Crawl. Four Spark stages mutate the data in
+order:
 
 | Stage | Program | What it does |
 |---|---|---|
-| `ingest` | `ingestion/pipeline.py` | Picks WARC files from a Common Crawl monthly index, extracts articles, filters by language/length, writes them into PostgreSQL. |
-| `chunk` | `chunking/pipeline.py` | Splits each article's clean text into overlapping chunks sized for retrieval. |
-| `tag` | `tagging/pipeline.py` | Sends each chunk to an LLM (Groq) that assigns structured labels/metadata. |
-| `embed` | `embeddings/pipeline.py` | Converts each chunk into a vector (embedding) so similar text can be found by math. |
-| `export` | (a Python helper, today `scripts/export_csv.py`) | Debug helper: dumps 9 database tables to CSV files. Not product-critical. |
+| `ingest` | `ingestion/pipeline.py` | Picks WARC files from a CC-NEWS monthly index, extracts articles, filters by language/length, writes them to PostgreSQL. |
+| `chunk` | `chunking/pipeline.py` | Splits each article's clean text into overlapping retrieval chunks. |
+| `tag` | `tagging/pipeline.py` | Sends each chunk to an LLM (Groq by default) for structured labels/metadata. |
+| `embed` | `embeddings/pipeline.py` | Converts each chunk into a normalized vector with the local INT8 ONNX model. |
 
-The stages have to happen in roughly this order (you cannot embed a chunk that has
-not been tagged, etc.), but in practice each stage is a **batch job** that grabs all
-pending work, does it, and exits. Nothing runs forever; nothing is a server.
+`scripts/export_csv.py` is an on-demand debug/export tool, not part of the daily
+chain.
 
-The stage code runs on an **Apache Spark** cluster. Spark is a framework that takes a
-Python program and runs parts of it in parallel across several machines. You will
-interact with exactly three Spark things:
+A stage cannot be run as a bare `python <stage>/pipeline.py`. The Spark workers are
+separate machines without the project's dependencies, so the glue code must:
 
-- `spark-submit` — the command that launches a program on the cluster. You hand it a
-  `.py` file and config; it distributes workers, runs, then exits.
-- **YARN** — the cluster's resource manager; the thing that decides which machine runs
-  which piece.
-- **HDFS** — the cluster's shared filesystem, used here as a cache for files that every
-  worker needs (see "why we package a whole venv" below).
+1. Load `.env` and let CLI flags override exported variables and `.env` defaults.
+2. Choose the stage virtual environment (`.venv` normally,
+   `.venv-embedding-onnx` for `embed`).
+3. Zip project source and pack the venv, fingerprinting both so unchanged
+   artifacts are reused.
+4. Publish archives and the embedding model to HDFS.
+5. Assemble and run `spark-submit`.
 
-Those three are external systems. The migration does not change anything about them.
-What it changes is all the **glue code** — the bash scripts that decide what to run,
-where, and with which settings.
+All of that now lives in `jobs/launcher.py`. Every stage call goes through
+`python -m jobs.launcher <stage>`, or `jobs.launcher.launch(stage, **options)`
+from Python.
 
-### Why the scripts exist, and why there are so many
+Terminology used below:
 
-To run a stage you cannot just call `python chunking/pipeline.py`. The workers on the
-cluster are separate computers; they do not have the project's dependencies installed.
-So before each run, the project:
-
-1. **Loads configuration** from a `.env` file at the project root (KEY=VALUE lines,
-   Git-ignored) — `jobs.launcher` asks `jobs/environment.py` for the values the file
-   adds, then passes them to every child process.
-2. **Picks a virtual environment.** A "venv" is a private, disposable copy of Python
-   plus specific package versions, ending in a directory like `.venv/bin/python`. This
-   project has two: `.venv` (the main one) and `.venv-embedding-onnx` (a lean one for
-   the embed stage only, which complains loudly if heavy packages leak into it).
-3. **Zips the project source** (`ingestion db chunking tagging embeddings jobs`) so it
-   can be shipped to workers with the run (`--py-files` in Spark terms).
-4. **Packs the whole venv as a tarball** (`venv pack`). Spark has a feature where you
-   provide archives with `--archives environment.tar.gz#environment`, and workers
-   unpack them at `/environment/...` before the job. `jobs.artifacts` uses
-   a hash (a "fingerprint": a sha256 sum of everything that affects the environment)
-   as part of the tarball filename so it only re-packs when dependencies change.
-5. **Uploads the archive to HDFS** so workers pull it from the cluster's filesystem
-   (fast, shared) rather than from the master over SSH-like access each run. Same for
-   the embedding model files. Every upload uses "write to a temp name, then rename"
-   so a crash never leaves a half-uploaded file at the final name.
-6. **Builds the `spark-submit` command** — a fairly long argument list (`--master yarn`,
-   memory sizes, environment variables to keep each worker to a single thread, and so
-   on). One is chosen to point at the right worker venv; others keep memory limits sane.
-
-All of the above is now Python. Every stage call goes through
-`python -m jobs.launcher <stage>`; the former shell wrappers have been deleted.
-
-### Terminology you'll hit in this doc
-
-- **Dry run** — a *dress rehearsal*. "Do everything a run would do to decide what it
-  would do (read config, walk the file manifest, validate flags) **but produce no
-  side effects**: no Spark job, no database writes, no archive uploads. It prints what
-  it *would* have done and exits. Used to check settings without the 10-minute wait.
-- **Fingerprint / content hash** — a sha256 digest computed over a set of files. If the
-  digest is the same as yesterday's, the underlying bytes are the same, so reuse the
-  cached artifact instead of rebuilding.
-- **Exit code** — every program tells its caller "how it went" using a number:
-  0 = success, anything else = something's wrong. This pipeline uses 0 = success,
-  1 = ordinary failure, 2 = "ran fine but the requested quota could not be met because
-  the source files ran out". Tests and Airflow respond differently to the three.
-- **XCom** — Airflow's mechanism for tasks to hand small values (a run-id, a row
-  count) to other tasks, visible in the UI.
-- **DAG** — "Directed Acyclic Graph" — Airflow's word for a named pipeline made of
-  ordered tasks. Shown in the UI as boxes and arrows.
-- **Dag file** — a Python file in `airflow/dags/` defining a DAG. Airflow's *scheduler*
-  reads these files automatically.
-
-### Airflow status in this repo
-
-Airflow is already installed and running (three systemd services:
-`airflow-api-server`, `airflow-dag-processor`, `airflow-scheduler`) with its web UI
-served by the API server. Details in `airflow/systemd/install.sh`. Two problems:
-
-- There is only a smoke-test DAG (`airflow/dags/airflow_smoke_test.py`).
-- The file `airflow/dags/ingestion.py` is **broken** — it is a truncated copy of the
-  smoke test that ends mid-file, so DAG parsing fails. It gets deleted in Phase 5.
-
-Airflow's own bookkeeping (metadata DB) is currently SQLite. Fine for one user; migrate
-it to the existing PostgreSQL server in Phase 4 for headroom.
+- **DAG** — an Airflow pipeline definition in `airflow/dags/`.
+- **Probe** — a cheap readiness task that runs before ingest.
+- **Exit code 2** — "the stage ran correctly but the selected sources ran out
+  before the requested quota." It is not an operational crash.
+- **Backfill** — an Airflow run created for a past logical date/range instead of
+  the current schedule.
+- **XCom** — Airflow's small-value handoff between tasks.
 
 ---
 
-## Part 1 — The actual work
+## What runs now
 
-### Decisions already made (do not relitigate)
+### Airflow topology
 
-- Keep Airflow 3.3.2; do not switch to Dagster/Prefect.
-- Migrate ALL shell scripts, including the one-off model download/setup scripts.
-- One DAG covering `ingest → chunk → tag → embed`. Export stays out of the operative
-  chain — it is a debug tool, triggered manually if needed.
-- Scheduler + retries replace `scripts/supervise_ingest.py`.
-- Airflow's metadata DB moves to PostgreSQL.
-- Hard cutover: delete `.sh` wrappers in the same change that adds their Python
-  replacements.
+```text
+probe → download_and_enter_db → chunk → tag → embed
+```
 
-`scripts/{ingest,chunk,tag,embed}.py` are already Python Spark entry points and stay
-as-is: `spark-submit` needs a real `.py` file as its script argument. The migration
-covers the *glue and operations*, not Spark itself.
+The DAG id remains **`ingestion_pipeline`**. It was not renamed to
+`news_pipeline`, to preserve existing run history and UI links.
 
-### Do the Airflow UI outputs need script changes first?
+`probe` checks:
 
-Keep Airflow's UI. The work needed to *look good in it* is mostly about where the
-boundaries sit, not pipeline internals:
+- Common Crawl: a ranged request to each month's `warc.paths.gz` manifest. HTTP
+  4xx counts as reachable (the manifest may not be published yet); HTTP 5xx and
+  network errors fail the probe.
+- YARN: `yarn node -list` must contain a `RUNNING` node.
+- HDFS: `hdfs dfs -test -e /`, unless `USE_HDFS_CACHE=0`.
+- PostgreSQL: `pg_isready` against the configured host/port.
 
-1. Per-stage tasks (`ingest → chunk → tag → embed`) so each stage gets its own
-   box/state/log/retry button in the UI, instead of one big amber square.
-2. Trigger forms via Airflow Params: `num-files`, `max-accepted-articles`,
-   `max-accepted-per-file`, `year/month` become run-time parameters instead of edited
-   `.env` files.
-3. Short structured end-of-task summaries (committed counts, run-id, YARN app id,
-   quota state) in the task log, and pushed as XComs where useful. Progress bars stay
-   off (`NO_PROGRESS=1`) — they are unreadable in UI logs.
-4. Exit-code mapping: ingestion exits `2` when sources cannot fulfill the quota; that
-   must read as a human explanation, not an ambiguous red failure.
-5. Retries configured in Airflow (`retries`, `retry_delay`) rather than bash loops.
+Ingest processes the data interval's month. On the first day of a month it also
+revisits the previous month, so late-published files are not missed. There are no
+`year`/`month` DAG params; use a backfill or a manual trigger with a logical date
+to target a specific month.
 
-## Phase 1 — Port the launcher (completed 2026-11-01)
+### Retries, timeouts, and exit 2
 
-`jobs/launcher.py` now runs as `python -m jobs.launcher <stage> --flags…` and
-reproduces the former shell sequence:
+| Task | Retries | Delay | Execution timeout |
+|---|---:|---:|---:|
+| `probe` | 3 | 2 min | 2 min |
+| `download_and_enter_db` | 3 | 5 min | 24 h |
+| `chunk` / `tag` / `embed` | 1 | 5 min | 48 h |
 
-1. Reads `.env` through `jobs/environment.py` in the bootstrap venv.
-2. Picks the right venv per stage: `.venv` normally, `.venv-embedding-onnx` for `embed`.
-3. Exits early with clear errors if a venv is missing.
-4. Runs the pipeline module directly for `--help` or dry runs (no packaging).
-5. Zips `ingestion db chunking tagging embeddings jobs` into `.build-tmp/`.
-6. For `embed`: tars the embedding model dir, keyed by a sha256 of all file contents.
-7. Fingerprints the venv (requirements + installed distributions + Python version) and
-   caches a `venv_pack` archive under `.build-tmp/` so repeat runs skip packing.
-8. Publishes archives to HDFS (`/user/$USER/apps/spark`) with upload→mv→verify, so
-   workers do not re-download archives from the master every run.
-9. Assembles and runs `spark-submit` with the same `--conf` flags, `--archives`, and
-   `--py-files`, pointing at `scripts/<stage>.py`.
+The timeouts are hang guards, not throughput targets. An ingest can legitimately
+run for hours; a dead YARN/HDFS run previously sat for days.
 
-The implementation is standard-library-only. Stage configuration is still resolved
-by `jobs.launch_config` inside the stage venv, and `hdfs`, `spark-submit`, `tar`, and
-`venv_pack` remain subprocesses.
+`jobs/airflow_tasks.launch_stage()` converts launcher exit code 2 into a warning
+result (`status="sources_exhausted"`) and prints `SOURCES EXHAUSTED`. The task
+succeeds so chunk/tag/embed can drain any existing backlog. Every other launcher
+failure still fails the task.
 
-The shell files were deleted: `scripts/run_processing.sh`,
-`scripts/run_ingestion.sh`, `scripts/run_chunking.sh`, `scripts/run_tagging.sh`, and
-`scripts/run_embeddings.sh`.
+An ingest retry starts a **new** ingestion run ledger and re-applies the quota. It
+does not resume the failed invocation's exact insertion count. Already-committed
+articles are idempotent, but strict monthly caps are not preserved across retries.
 
-Checklist:
+### DAG params
 
-- [x] `python -m jobs.launcher ingest --dry-run --max-accepted-articles 1000` prints
-      the same config summary the shell version did, exit code 0.
-- [x] Same for `chunk`, `tag`, `embed` `--dry-run`; the captured JSON matches.
-- [x] `--help` works for all four stages (the stage venv is still required, as before).
-- [x] A real smoke ingest (`--max-accepted-articles 10`) commits articles and prints
-      the same final summary (counts, per-file status, resume command): run
-      `4f88e7dd-1129-412d-9ba7-47fd7ebe870c` committed 10/10, YARN app
-      `application_1792660710586_0024` finished `SUCCEEDED`.
-- [x] The second ingest run does NOT re-pack the venv (fingerprint cache hit).
-- [x] Missing `.venv` produces the same friendly error the shell version gave.
-- [x] Unit tests cover flag parsing, venv selection, fingerprint stability, and the
-      assembled spark-submit argv.
+The trigger form exposes:
 
-Children of Phase 1:
-
-| Phase | Size | Notes |
-|---|---|---|
-| 2. Utilities | small, ~½ day | Completed with the launcher port |
-| 3. Setup scripts | small, ~½ day | Still independent |
-
-## Phase 2 — Port the utility scripts (completed 2026-11-01)
-
-| Former | Now | Notes |
-|---|---|---|
-| `scripts/export_csv.sh` | `scripts/export_csv.py` | psycopg2 `COPY … TO STDOUT` per table, same 9 tables / same ORDER BY, staging dir then rename (atomic swap), row-count report, optional copy to the HGFS share. Keeps the `csv_dir dest_dir` positional override interface. |
-| `scripts/inspect_db.sh` | (deleted) | Use `python -m db.inspect` directly. |
-| `scripts/watch_embeddings.sh` | (deleted) | Use `python -m scripts.watch_embeddings` directly. |
-
-Explanations for the unfamiliar:
-
-- **psycopg2** is the standard Python driver for PostgreSQL — a library that lets a
-  Python file speak the database's native protocol. `COPY … TO STDOUT` is a Postgres
-  statement that streams table rows as text (CSV here) fast; far faster than `SELECT`.
-  The shell version opened a `psql` command-line session per table; the Python version
-  reuses one psycopg2 connection across all nine.
-- **Atomic swap** — write all rows to a hidden temp name like `.export-XXXXXX/`, verify
-  it worked, then `os.replace` the finished files over the previous ones. So a partial
-  failure never leaves broken files where users expect clean ones.
-- **HGFS** — the VMware "Host-Guest File System" shared folder between this Linux VM
-  and its Windows/macOS host. `scripts/export_csv.py` copies the files to
-  `/mnt/hgfs/copy_path/warcdb_csv/` so someone on the host machine can open them in
-  Excel. The copy step is preserved.
-
-Checklist:
-
-- [x] Unit tests cover all 9 tables, the ORDER BY statements, staging, row counts,
-      failure behavior, and the HGFS copy with a fake connection.
-- [ ] Live byte-for-byte spot-check against a previous shell export (not rerun).
-- [x] `python -m db.inspect` and `python -m scripts.watch_embeddings` are the documented
-      direct module commands.
-
-## Phase 3 — Port the one-off setup scripts
-
-Nobody runs these daily, but "single language" means they go too. These are mostly
-sequential `subprocess.run` calls — the easiest ports in the plan.
-
-| Current | Replace with | Notes |
-|---|---|---|
-| `scripts/setup_embedding_onnx_env.sh` | `scripts/setup_embedding_onnx_env.py` | Same venv creation, pinned requirements install with the same pip flags, `pip check`, and the "must not contain torch" guard (a regression catcher: if a heavy library sneaks into the lean worker env, Spark workers OOM). |
-| `scripts/download_quantized_embedding_model.sh` | `scripts/download_quantized_embedding_model.py` | Same pinned ONNX revision (a specific published file version, chosen deliberately and kept constant — do not "upgrade" it), tokenizer/pooling layout, checksum-vs-existing-file logic. |
-| `scripts/download_quantized_reranker_model.sh` | `scripts/download_quantized_reranker_model.py` | Preserve resume-if-partially-downloaded behavior if present. |
-
-Checklist:
-
-- [ ] Running the Python versions on a clean directory reproduces the same
-      `.venv-embedding-onnx` and `.models/*` contents (verify via the fingerprint /
-      `pip check` assertions the scripts already print).
-
-## Phase 4 — Move Airflow's metadata DB to PostgreSQL
-
-**Do this BEFORE creating real DAGs**, so nothing gets registered twice.
-
-What is "Airflow's metadata DB"? Airflow is a long-running service; it needs somewhere
-to store "what DAGs exist, which runs happened, which tasks succeeded, when to retry".
-That storage is its metadata DB. It currently points at **SQLite** — a single-file
-database fine for one writer, but a known ceiling once a scheduler, a dag processor,
-and an API server all hit it concurrently. Your machine already runs a real
-PostgreSQL server; give Airflow a database on it.
-
-1. Create a dedicated `airflow` database on the existing PG server (not `warcdb`) and
-   a role/password for it.
-2. Update the Airflow config — the `airflow.cfg` under the Airflow Home
-   (`/home/spark-master/airflow/`), or the `airflow.env` env file the systemd units
-   load — with `sql_alchemy_conn = postgresql+psycopg2://USER:PASSWORD@HOST/airflow`.
-3. Run `airflow db migrate`, then restart the three systemd units
-   (`airflow-api-server`, `airflow-dag-processor`, `airflow-scheduler`).
-4. Verify the UI loads, the existing smoke-test DAG is visible, and a short run works.
-
-Checklist:
-
-- [ ] `airflow db check` passes against Postgres.
-- [ ] All three units show `active (running)` after restart.
-- [ ] UI log viewer still shows live logs from a test task run.
-
-## Phase 5 — Build the DAGs
-
-First **delete `airflow/dags/ingestion.py`** — it is a truncated copy of
-`airflow_smoke_test.py` that ends mid-file, so DAG parsing fails. It was never a real
-DAG.
-
-Then create:
-
-**`news_pipeline`** — the operative DAG.
-
-- Task chain: `probe → ingest → chunk → tag → embed`.
-- `probe` checks `data.commoncrawl.org` with a small range request so Airflow retries
-  during a real outage do not hammer the cluster (mirrors `supervise_ingest.py`).
-- Each stage task is a thin Airflow TaskFlow function running
-  `python -m jobs.launcher <stage> …` via subprocess. Launch logic lives in
-  `jobs/launcher.py`, not in the DAG file — DAGs stay readable at a glance.
-- Parameters render as a trigger form in the UI: `year`, `month`, `num_files`,
-  `max_accepted_articles`, `max_accepted_per_file`, plus launcher flags as needed.
-- Retries on the ingest step (`retries=3`, `retry_delay` a few minutes) replace
-  `supervise_ingest.py`.
-- Exit code `2` (sources exhausted) logs a clear "sources exhausted before quota"
-  message near the end of the task log; it should not look like a random crash.
-
-**`news_export`** — optional, manual-trigger only (`schedule=None`).
-
-- One task calling `python -m scripts.export_csv` with optional `csv_dir/dest_dir`
-  params. Not chained into `news_pipeline`; export is a debug tool.
-
-**Update `airflow_smoke_test.py`** at the end of this phase: dry-run the launcher's
-new Python path instead of the shell one.
-
-Checklist:
-
-- [ ] `airflow dags list-import-errors` returns nothing.
-- [ ] `news_pipeline` can be triggered from the UI with parameters and shows all four
-      stages green for a small quota run.
-- [ ] The UI log viewer shows the ingest summary output.
-- [ ] Killing an ingest task mid-run and re-running retries sensibly.
-- [ ] `news_export` runs end-to-end from a manual UI trigger.
-
-## Phase 6 — Retire `supervise_ingest.py`
-
-Only after Phase 5 has proven out over a few real runs — this is the moment the
-scheduler takes over the resume-on-outage job.
-
-- [ ] Confirm a killed/failed ingest in Airflow is retried per config.
-- [ ] Delete `scripts/supervise_ingest.py` and its pidfile/logfile convention.
-- [ ] Remove or rewrite mentioning docs; point at the DAG instead.
-
-## Phase 7 — Docs and tests
-
-Do these continuously, but note them as their own item.
-
-- Update `README.md` run commands: `python -m jobs.launcher <stage>`, the Python
-  export/DB commands, and how to trigger the DAGs from the UI. Remove shell
-  invocations.
-- Update `docs/processing.md` and `docs/workflows.md` for the new interfaces.
-- Unit tests for `jobs/launcher.py` are the important new asset; keep
-  `tests/test_launcher.py` focused on it.
-- Do **not** touch pipeline logic (`ingestion/`, `chunking/`, `tagging/`,
-  `embeddings/`, `retrieval/`, `db/`) — those are already Python and are not part of
-  the migration.
+- `num_files` — `all` or a positive WARC file count.
+- `max_accepted_articles` — per-month new-article cap; `0` is unlimited.
+- `max_accepted_per_file` — per-file cap; `0` is unlimited.
+- `chunk_max_documents`, `tag_max_chunks`, `embed_max_chunks` — per-stage limits;
+  `0` is unlimited.
 
 ---
 
-## Order and sizing
+## Phase history
 
-| Phase | Size | Depends on |
-|---|---|---|
-| 1. Launcher port | largest, ~2–3 days | – |
-| 2. Utilities | ~½ day | – |
-| 3. Setup scripts | ~½ day | – |
-| 4. Airflow DB | ~1 hr | – (do before 5) |
-| 5. DAGs | ~1 day | 1, 4 |
-| 6. Retire supervisor | tiny | 5 proven in production |
-| 7. Docs/tests | ongoing | all |
+### Phase 1 — Port the launcher (completed 2026-11-01)
 
-## Out of scope
+`jobs/launcher.py` reproduces the former shell sequence: `.env` loading, stage venv
+selection, source zip, venv packing and fingerprint cache, embedding-model archive,
+HDFS publishing, and `spark-submit` assembly. The launcher is standard-library-only;
+`.env` reading, `venv_pack`, `tar`, `hdfs`, and `spark-submit` remain child
+processes.
 
-- Any change to pipeline internals or model behavior.
-- Any change to `retrieval/` / the RAG agent.
-- Airflow auth hardening, Celery/Kubernetes executors, HA setups.
+The old shell wrappers (`run_processing.sh`, `run_ingestion.sh`,
+`run_chunking.sh`, `run_tagging.sh`, `run_embeddings.sh`) were deleted.
 
-## Risks to watch
+Verified: dry-run JSON, `--help`, and assembled `spark-submit` argv match the
+captured shell baseline; a failed child's exit code is passed through; exported
+variables win over `.env`; a second run reuses the cached venv archive; a real
+one-file smoke ingest committed 10/10 articles and finished `SUCCEEDED` on YARN.
 
-- **Fingerprint/cache drift (Phase 1).** The venv and model archives are cached by
-  content hash. A subtle hash-input difference between the bash and Python versions
-  causes useless repacks (annoying but safe) or, worst case, worker/runtime mismatch
-  (bad). Test by running the same stage twice and confirming the cache is hit, then
-  once with a modified requirements file to confirm invalidation.
-- **Export during an active run (Phase 2).** Exporting during an embedding run
-  captures only committed rows today; preserve that behavior, do not make it
-  transactional.
-- **Airflow/DB restart (Phase 4).** Brief scheduler downtime builds up backlog; do it
-  in a quiet window and check no DAG runs are mid-flight.
-- **Exit 2 semantics (Phase 5).** If Airflow treats "sources exhausted" as a plain
-  failure, retries burn pointlessly against an exhausted manifest. Handle this case
-  specifically in message and retry logic.
+### Phase 2 — Port the utility scripts (completed 2026-11-01)
+
+| Former | Now |
+|---|---|
+| `scripts/export_csv.sh` | `scripts/export_csv.py` |
+| `scripts/inspect_db.sh` | `python -m db.inspect` |
+| `scripts/watch_embeddings.sh` | `python -m scripts.watch_embeddings` |
+
+`export_csv.py` keeps the nine-table COPY export, per-table `ORDER BY`, staging
+directory plus atomic swap, row counts, and the optional HGFS copy. It also gained
+sampling (`--sample N`), optional chunk tables (`--include-chunks`), and zip output
+(`--zip` / `--zip-path`).
+
+### Phase 3 — Port the one-off setup scripts (completed 2026-11-10)
+
+| Former | Now |
+|---|---|
+| `scripts/setup_embedding_onnx_env.sh` | `scripts/setup_embedding_onnx_env.py` |
+| `scripts/download_quantized_embedding_model.sh` | `scripts/download_quantized_embedding_model.py` |
+| `scripts/download_quantized_reranker_model.sh` | `scripts/download_quantized_reranker_model.py` |
+| `airflow/systemd/install.sh` | `airflow/systemd/install.py` |
+
+Shared resume/retry/atomic-rename helpers live in `scripts/download_utils.py`. The
+download scripts keep the pinned ONNX revisions, tokenizer/pooling layout, and
+checksum verification. The reranker script verifies the model SHA-256 and a smoke
+ranking. The embedding script reuses an already-complete target metadata directory
+when the optional `.models/bge-m3` source metadata is absent, so reruns are
+idempotent on a machine that only kept the quantized output.
+
+Verified on this host:
+
+- `setup_embedding_onnx_env.py`: pip install, `pip check`, and the "no torch /
+  no sentence-transformers" guard pass.
+- `download_quantized_embedding_model.py`: validates the existing 563 MiB INT8
+  graph and prints the ONNX inputs/outputs.
+- `download_quantized_reranker_model.py`: reuses the checksum-verified graph and
+  validates ranking scores `[6.6368, -11.0271]`.
+- All three `.sh` files and `airflow/systemd/install.sh` were deleted.
+
+### Phase 4 — Move Airflow's metadata DB to PostgreSQL (completed)
+
+Airflow runs three systemd units (`airflow-scheduler`, `airflow-dag-processor`,
+`airflow-api-server`) with `AIRFLOW_HOME=/home/spark-master/airflow`. The metadata
+database is PostgreSQL; `airflow db check` passes. The API server listens on
+`127.0.0.1:8080`.
+
+The units are installed by `airflow/systemd/install.py` after reviewing
+`/home/spark-master/airflow/airflow.env`.
+
+### Phase 5 — Build the DAG (completed 2026-11-10)
+
+`airflow/dags/ingestion.py` is a real TaskFlow DAG with an `external_python` task
+for each stage. `airflow dags list-import-errors` is clean and the task list is
+`probe`, `download_and_enter_db`, `chunk`, `tag`, `embed`.
+
+Deviations from the original plan:
+
+- The DAG id stayed `ingestion_pipeline`, not `news_pipeline`.
+- No `news_export` DAG was created; export remains an on-demand script.
+- The probe checks all four dependencies, not just Common Crawl.
+- Month/year are selected by backfill/logical date, not trigger params.
+- `scripts/supervise_ingest.py` was **not** deleted in Phase 5.
+
+### Phase 6 — Retire `supervise_ingest.py` (deferred)
+
+The supervisor remains available as a manual fallback. It is not started by
+Airflow and must not run concurrently with `ingestion_pipeline`: the ingestion
+coordinator advisory lock allows only one ingest at a time.
+
+Retire it only after the DAG has proven out over several real runs, including a
+killed/failed ingest that Airflow retried successfully.
+
+### Phase 7 — Docs and tests (current state)
+
+The README now has an Airflow runbook (services, UI, trigger, backfill, logs,
+recovery, smoke test). `docs/processing.md` documents the launcher cache/timing,
+per-stage limits, and Python setup commands. `docs/validation.md` records the
+launcher port and the current verification. `docs/module_map.md` covers the new
+modules.
+
+New/updated tests:
+
+- `tests/test_preflight.py` — probe success, 4xx vs 5xx, YARN/HDFS/Postgres
+  failures, and the summary.
+- `tests/test_airflow_tasks.py` — exit-2 conversion, other failures propagate,
+  month selection (mid-month, first-of-month, January), manifest URLs.
+- `tests/test_download_utils.py` — atomic writes, Range resume, server ignoring
+  Range, 4xx no-retry, transient retry, hashing/size helpers.
+- Existing launcher, artifacts, processing, export, and shared-helper tests cover
+  the caching, timing, per-stage limit, and export changes.
+
+---
+
+## Operations
+
+### Services and UI
+
+```bash
+sudo systemctl status airflow-scheduler airflow-dag-processor airflow-api-server --no-pager
+ssh -L 8080:127.0.0.1:8080 spark-master   # then http://localhost:8080
+```
+
+Use the simple-auth credentials in
+`/home/spark-master/airflow/airflow.env` (`AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS`).
+The CLI needs the same environment:
+
+```bash
+set -a; . /home/spark-master/airflow/airflow.env; set +a
+/home/spark-master/airflow-venv/bin/airflow <command>
+```
+
+### Trigger
+
+```bash
+airflow dags trigger ingestion_pipeline --conf '{
+  "num_files": "1",
+  "max_accepted_articles": 10,
+  "max_accepted_per_file": 10,
+  "chunk_max_documents": 10,
+  "tag_max_chunks": 10,
+  "embed_max_chunks": 2
+}'
+```
+
+### Backfill
+
+Backfill dates create one run per day in the range. For one pass over a month, use
+a single mid-month day and set the end date to the next day (the end is exclusive
+in practice):
+
+```bash
+airflow backfill create \
+  --dag-id ingestion_pipeline \
+  --from-date 2026-09-15 \
+  --to-date 2026-09-16 \
+  --dag-run-conf '{"num_files":"all","max_accepted_articles":0,"max_accepted_per_file":0}'
+```
+
+For a year, create one single-day backfill per month; `max_active_runs=1` makes
+them queue and run in order.
+
+### Logs and recovery
+
+Task logs:
+`/home/spark-master/airflow/logs/dag_id=ingestion_pipeline/run_id=<run_id>/task_id=<task_id>/`.
+
+The launcher writes `[launcher] <step>: <seconds>` timing lines to stderr before
+Spark starts. Every stage ends with a `PHASE SUMMARY <stage>` JSON line.
+
+Clear a failed task by its logical date:
+
+```bash
+airflow tasks clear ingestion_pipeline \
+  -s <logical_date> -e <logical_date> \
+  -t download_and_enter_db -y
+```
+
+### Smoke test
+
+```bash
+airflow dags test airflow_smoke_test
+```
+
+The smoke test verifies the Airflow runtime, `spark-submit`/`hdfs`/`yarn`
+visibility, the project venv, the embedding model file, PostgreSQL readiness, and
+a launcher dry run. It does not start Spark or touch the ingestion lock.
+
+---
+
+## Verification and known risks
+
+Verified for this migration:
+
+- DAG import is clean; `airflow tasks list ingestion_pipeline` shows all five
+  tasks.
+- `jobs.preflight.run` passes on this host when Common Crawl is responsive; a
+  transient Common Crawl HTTP 503 correctly sent the probe to `up_for_retry`, and
+  the retry succeeded.
+- The three setup/download scripts run against the existing environments.
+- Unit tests for preflight, Airflow task helpers, and download utilities pass.
+
+Known risks / remaining measurements:
+
+- **Common Crawl intermittently returns 503** to `urllib` requests for the
+  manifest even when `curl` immediately returns 206. The probe retries, but a
+  sustained 503 will delay ingest. This is the reason 4xx is distinguished from
+  5xx.
+- **Embedding throughput is not measured at scale.** The only evidence is two
+  one-chunk runs at roughly 4.8 and 5.3 minutes, dominated by Spark/YARN startup.
+  The 48-hour stage timeout is therefore a hang guard, not a validated throughput
+  bound. Measure a sustained run before treating 48 hours as capacity.
+- **Ingest retries re-apply the quota** and start a new run ledger; strict monthly
+  caps are not preserved across retries.
+- **The first live run after deployment was disrupted.** The
+  `scheduled__2026-11-08T22:00:00+00:00` ingest task was terminated by SIGTERM after
+  about 38 minutes; the cause was not conclusively identified. The new probe ran
+  afterwards, hit a transient 503, retried, and succeeded, but the run was already
+  failed because ingest had failed. The next scheduled run uses the new DAG. Clear
+  or retry the failed task only after confirming the cluster and Common Crawl are
+  healthy.
+- **Supervisor coexistence.** Do not run `scripts/supervise_ingest.py` and the DAG
+  at the same time.
+
+---
 
 ## Command mapping
 
@@ -376,4 +345,8 @@ Do these continuously, but note them as their own item.
 | `./scripts/export_csv.sh` | `python -m scripts.export_csv` |
 | `./scripts/inspect_db.sh` | `python -m db.inspect` |
 | `./scripts/watch_embeddings.sh` | `python -m scripts.watch_embeddings` |
-| manual babysitting via `scripts/supervise_ingest.py` | still `scripts/supervise_ingest.py`; Airflow DAG `news_pipeline` will replace it |
+| `bash scripts/setup_embedding_onnx_env.sh` | `python scripts/setup_embedding_onnx_env.py` |
+| `bash scripts/download_quantized_embedding_model.sh` | `python scripts/download_quantized_embedding_model.py` |
+| `bash scripts/download_quantized_reranker_model.sh` | `python scripts/download_quantized_reranker_model.py` |
+| `bash airflow/systemd/install.sh` | `python airflow/systemd/install.py` |
+| manual babysitting via `scripts/supervise_ingest.py` | Airflow `ingestion_pipeline` (supervisor retained as a manual fallback until Phase 6) |

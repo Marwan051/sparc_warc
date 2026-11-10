@@ -7,7 +7,7 @@ counts only newly committed articles toward your requested quotas.
 [Architecture](docs/architecture.md) · [Module map](docs/module_map.md) ·
 [Workflows](docs/workflows.md) · [Validation results](docs/validation.md) ·
 [RAG API plan](docs/rag-api-plan.md) ·
-[Airflow migration plan](docs/airflow-migration.md)
+[Airflow migration notes](docs/airflow-migration.md)
 
 For parallel post-ingestion processing, use the independent
 [Spark processing jobs](docs/processing.md):
@@ -141,6 +141,150 @@ An invocation without `RESUME_RUN_ID` starts a new quota and reuses verified sou
 checkpoints. A file stopped at its per-file cap remains available to later runs;
 only a file read to EOF is marked exhausted.
 
+## Airflow automation
+
+The daily DAG is `ingestion_pipeline`. It runs
+`probe → download_and_enter_db → chunk → tag → embed` with one active run and one
+active task at a time. The probe checks the Common Crawl `warc.paths.gz` index for
+the run's month(s), YARN, HDFS (unless `USE_HDFS_CACHE=0`), and PostgreSQL. Ingest
+is retried three times; each post-ingestion stage is retried once. Ingest has a
+24-hour execution timeout and chunk/tag/embed have 48-hour timeouts; these are hang
+guards, not throughput targets.
+
+Each task calls a thin wrapper in `jobs/airflow_tasks.py`, which invokes
+`jobs.launcher`. Exit code `2` (sources exhausted before the quota) is logged as
+`SOURCES EXHAUSTED` and treated as a successful ingest so the downstream stages can
+still drain pending work. Other launcher failures remain task failures.
+
+### Services and UI
+
+Airflow is installed under `/home/spark-master/airflow-venv` with
+`AIRFLOW_HOME=/home/spark-master/airflow`. Three systemd units run it:
+
+```bash
+sudo systemctl status airflow-scheduler airflow-dag-processor airflow-api-server --no-pager
+```
+
+The API server listens on `127.0.0.1:8080`. From your workstation, open an SSH
+tunnel and browse to `http://localhost:8080`:
+
+```bash
+ssh -L 8080:127.0.0.1:8080 spark-master
+```
+
+Use the simple-auth credentials configured in
+`/home/spark-master/airflow/airflow.env` (`AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS`).
+The metadata database is PostgreSQL, not SQLite.
+
+The CLI needs the same environment as the services. Prefix commands with:
+
+```bash
+set -a; . /home/spark-master/airflow/airflow.env; set +a
+/home/spark-master/airflow-venv/bin/airflow <command>
+```
+
+### Operate the DAG
+
+```bash
+# Is the DAG importable?
+airflow dags list-import-errors
+
+# Recent runs and per-task state
+airflow dags list-runs ingestion_pipeline -o table
+airflow tasks states-for-dag-run ingestion_pipeline <run_id> -o table
+
+# Pause/resume new scheduled runs (a running run is not stopped)
+airflow dags pause ingestion_pipeline
+airflow dags unpause ingestion_pipeline
+```
+
+Trigger a bounded smoke run from the CLI. These values override the DAG params
+for that run only:
+
+```bash
+airflow dags trigger ingestion_pipeline --conf '{
+  "num_files": "1",
+  "max_accepted_articles": 10,
+  "max_accepted_per_file": 10,
+  "chunk_max_documents": 10,
+  "tag_max_chunks": 10,
+  "embed_max_chunks": 2
+}'
+```
+
+The same params are available in the Airflow trigger form. `num_files` accepts
+`all` or a positive file count. The ingest limits apply to **each month the run
+processes**, not to the run as a whole; `0` means unlimited.
+
+### Backfill a month or year
+
+Backfill dates create one DAG run per day in the range, so use a single
+mid-month day when you want one ingest pass over a month. The end date is
+exclusive in practice; use the next day:
+
+```bash
+# One run whose data interval falls in September 2026.
+airflow backfill create \
+  --dag-id ingestion_pipeline \
+  --from-date 2026-09-15 \
+  --to-date 2026-09-16 \
+  --dag-run-conf '{"num_files":"all","max_accepted_articles":0,"max_accepted_per_file":0}'
+```
+
+For a whole year, create one single-day backfill per month (the DAG allows only
+one active run, so they queue and execute in order):
+
+```bash
+for month in 01 02 03 04 05 06 07 08 09 10 11 12; do
+  airflow backfill create \
+    --dag-id ingestion_pipeline \
+    --from-date "2025-$month-15" \
+    --to-date "2025-$month-16" \
+    --dag-run-conf '{"num_files":"all","max_accepted_articles":0,"max_accepted_per_file":0}'
+done
+```
+
+The daily schedule processes the data interval's month, and also revisits the
+previous month on the first day of a month. Use a backfill (or a manual trigger
+with `--logical-date`) when you need a specific older month; there is no
+`year`/`month` param on the DAG.
+
+### Logs, retries, and recovery
+
+Task logs are in
+`/home/spark-master/airflow/logs/dag_id=ingestion_pipeline/run_id=<run_id>/task_id=<task_id>/`.
+The UI log viewer shows the same stream. The launcher prints
+`[launcher] <step>: <seconds>` lines before Spark starts, and each stage prints a
+`PHASE SUMMARY <stage>` JSON line at the end.
+
+Retry a failed task from the UI (Clear) or clear it from the CLI after fixing the
+cause. Use the run's logical date as the start and end bound:
+
+```bash
+airflow tasks clear ingestion_pipeline \
+  -s <logical_date> -e <logical_date> \
+  -t download_and_enter_db -y
+```
+
+An ingest retry starts a new ingestion run ledger and re-applies its quota; it
+does not resume the failed invocation's exact insertion count. Files already
+committed are idempotent, but strict monthly caps are not preserved across
+retries.
+
+`scripts/supervise_ingest.py` still exists as a manual fallback, but it is not
+started by Airflow. Do not run it at the same time as `ingestion_pipeline`: the
+ingestion coordinator advisory lock lets only one ingest proceed.
+
+### Airflow smoke test
+
+```bash
+airflow dags test airflow_smoke_test
+```
+
+This checks the Airflow runtime, `spark-submit`/`hdfs`/`yarn` visibility, the
+project venv, the embedding model file, PostgreSQL readiness, and a launcher dry
+run. It does not start Spark or touch the ingestion lock.
+
 ## Configuration
 
 Ingestion accepts `--lower-kebab-case` flags for these variables (for example,
@@ -204,6 +348,30 @@ to `/mnt/hgfs/copy_path/warcdb_csv/`. Optional arguments override both directori
 
 ```bash
 python -m scripts.export_csv ./exports /path/to/destination
+```
+
+For a smaller, shareable export, sample random articles instead. This picks N
+random pages and writes only the article-level rows (`websites`, `authors`,
+`pages`, `metadata`, `content`) to `exports/sample-N` by default. It does not
+export chunk tables or embeddings and does not copy to the HGFS share unless you
+pass a destination explicitly:
+
+```bash
+python -m scripts.export_csv --sample 10000
+python -m scripts.export_csv --sample 10000 ./exports/sample ./path/to/destination
+python -m scripts.export_csv --sample 10000 --seed 0.5  # reproducible selection
+```
+
+Add `--include-chunks` to include chunk materializations, chunks, and chunk
+analyses for the sampled pages (embeddings are still excluded).
+
+Pass `--zip` to also archive the exported CSVs as `<csv_dir>.zip` (for example,
+`exports/sample.zip`). The archive is copied to the destination as well when one
+is given. Use `--zip-path` for a custom location:
+
+```bash
+python -m scripts.export_csv --sample 10000 --zip
+python -m scripts.export_csv --sample 10000 --zip-path ./exports/articles.zip
 ```
 
 `chunk_embeddings.csv` contains the full pgvector values and can be large.
@@ -274,7 +442,7 @@ permitted when evidence for part of the question is missing.
 Download the reranker once into `.models/bge-reranker-v2-m3-int8`:
 
 ```bash
-bash scripts/download_quantized_reranker_model.sh
+python scripts/download_quantized_reranker_model.py
 ```
 
 The reranker runs locally in the `.venv-rag` process (not on Spark), because its

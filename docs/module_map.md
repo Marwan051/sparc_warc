@@ -40,6 +40,20 @@ main()                                        # tab-separated stdout resolver fo
 # jobs/errors.py
 LaunchError(message="", exit_code=1)          # message plus launcher exit code
 
+# jobs/preflight.py
+PreflightError
+check_common_crawl(urls, timeout=30) -> str   # 4xx is reachable; 5xx/network fails
+check_yarn(timeout=30) -> str                # require a RUNNING node
+check_hdfs(settings, timeout=30) -> str      # skipped when USE_HDFS_CACHE=0
+check_postgres(settings, timeout=10) -> str  # pg_isready host/port check
+run(manifest_urls, environ=None) -> dict      # all checks, XCom-friendly summary
+
+# jobs/airflow_tasks.py
+launch_stage(stage, **options) -> dict        # exit 2 -> sources_exhausted warning
+ingestion_months(data_interval_start) -> list[tuple[int, int]]
+manifest_url(year, month) -> str
+manifest_urls(data_interval_start) -> list[str]
+
 # jobs/launcher.py
 main(argv=None) -> int                        # load env, select venv, package, submit one stage
 run(arguments) -> int                         # stage parsing, help/dry-run, artifact orchestration
@@ -47,10 +61,13 @@ run(arguments) -> int                         # stage parsing, help/dry-run, art
 # jobs/artifacts.py
 venv_fingerprint(stage, venv, root, environ) -> str
 tree_fingerprint(path, environ, maxdepth_one=False) -> str
+metadata_fingerprint(path, environ, maxdepth_one=False) -> str
+cached_tree_fingerprint(path, build_dir, environ, maxdepth_one=False) -> str
 write_project_zip(root, destination)
 ensure_venv_archive(venv, fingerprint, build_dir, task_tmp, environ) -> Path
 ensure_model_archive(source, build_dir, task_tmp, environ) -> (str, Path)
 ensure_jars_archive(spark_home, build_dir, task_tmp, environ) -> (str, Path)
+hdfs_existing(binary, destinations, environ) -> set[str]
 publish_artifacts(...) -> (archives_spec, extra_conf, model_spec)
 
 # jobs/spark.py
@@ -460,9 +477,29 @@ search(query: str, top_k: int, chunking_version=None, embedding_model=None, ...)
 main()
 
 # scripts/export_csv.py
-TABLES, ORDER_BY
-export(connection, csv_dir, dest_dir)         # staging files, atomic moves, row counts, HGFS copy
-main(argv=None, connect=None) -> int          # csv_dir / dest_dir positional overrides
+TABLES, ORDER_BY, ARTICLE_TABLES, CHUNK_TABLES, SAMPLE_TABLES
+export(connection, csv_dir, dest_dir, sample=None, seed=None,
+       include_chunks=False, zip_path=None)   # staging files, atomic moves, row counts, optional HGFS copy/zip
+main(argv=None, connect=None) -> int            # csv_dir / dest_dir positionals;
+                                                # --sample/--rows N, --seed, --include-chunks,
+                                                # --zip, --zip-path
+
+# scripts/download_utils.py
+DownloadError
+sha256_file(path) -> str
+directory_size(path) -> int
+format_size(size) -> str
+download(url, destination, *, headers=None, retries=10,
+         retry_delay=5, timeout=30) -> None   # Range resume, retry, atomic rename
+
+# scripts/setup_embedding_onnx_env.py
+main() -> int    # create .venv-embedding-onnx, install pinned requirements, pip check, no-torch guard
+
+# scripts/download_quantized_embedding_model.py
+main() -> int    # copy tokenizer/pooling metadata, download pinned INT8 graph, validate ONNX
+
+# scripts/download_quantized_reranker_model.py
+main() -> int    # download metadata, verify SHA-256, run reranker smoke ranking
 ```
 
 None of the script functions carry docstrings or annotations except
@@ -470,6 +507,29 @@ None of the script functions carry docstrings or annotations except
 paired with `jobs/environment.py`, `jobs/launch_config.py`, `jobs/artifacts.py`,
 and `jobs/spark.py`. `python -m db.inspect` and
 `python -m scripts.watch_embeddings` are direct module commands.
+
+---
+
+## airflow/ — orchestration
+
+```python
+# airflow/dags/ingestion.py
+probe(data_interval_start) -> dict
+download_and_enter_db(data_interval_start, num_files,
+                      max_accepted_articles, max_accepted_per_file) -> dict
+chunk(max_documents) -> dict
+tag(max_chunks) -> dict
+embed(max_chunks) -> dict
+# chain: probe -> download_and_enter_db -> chunk -> tag -> embed
+
+# airflow/systemd/install.py
+main() -> int    # install the three units with sudo, then systemctl daemon-reload
+```
+
+The DAG uses `jobs.preflight.run()` for readiness and
+`jobs.airflow_tasks.launch_stage()` for every stage call. The systemd units run
+with `AIRFLOW_HOME=/home/spark-master/airflow`; the metadata database is
+PostgreSQL.
 
 ---
 

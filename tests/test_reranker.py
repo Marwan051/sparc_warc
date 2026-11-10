@@ -4,7 +4,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 
-AVAILABLE = importlib.util.find_spec("numpy") is not None
+AVAILABLE = all(
+    importlib.util.find_spec(name) is not None
+    for name in ("numpy", "pgvector", "onnxruntime", "transformers")
+)
 
 
 def make_reranker(batch_size=4):

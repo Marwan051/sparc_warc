@@ -24,8 +24,8 @@ Prepare the dedicated embedding environment and local INT8 model once. The
 other services continue to use `.venv`:
 
 ```bash
-bash scripts/setup_embedding_onnx_env.sh
-bash scripts/download_quantized_embedding_model.sh
+python scripts/setup_embedding_onnx_env.py
+python scripts/download_quantized_embedding_model.py
 python -m jobs.launcher embed --embedding-limit 100
 ```
 
@@ -35,7 +35,8 @@ set `EMBEDDING_MODEL_DIR` when the quantized model lives outside
 `.models/bge-m3-int8`; set `EMBEDDING_SOURCE_MODEL_DIR` when its base tokenizer
 assets live outside `.models/bge-m3`.
 Workers run CPU inference, with max length 256, batch size 1, and one native ONNX
-thread by default. The embedding limit counts scheduled chunks.
+thread by default. The embedding limit counts scheduled chunks. Set it to `0` to
+process all pending work; `EMBEDDING_LIMIT` is the environment fallback.
 
 Vectors are stored in `chunk_embeddings`, linked to `article_chunks` by
 `page_id`, `chunking_version`, and `chunk_index`. They retain the chunk text hash
@@ -76,6 +77,24 @@ store and cluster administrators can access executor environments.
 
 `--dry-run` validates arguments without opening Spark, PostgreSQL, or a provider
 connection and without packaging. All stages support `--help`.
+
+### Launcher cache and timing
+
+The launcher writes one `[launcher] <step>: <seconds>` line per setup step to
+standard error, so Airflow logs show where time is spent before Spark starts.
+These lines do not change the JSON emitted by `--dry-run` or the Spark driver.
+
+Spark jars and the embedding model are fingerprinted from file names, sizes,
+and mtimes. The real content digest is cached under `.build-tmp` and recomputed
+only when that metadata changes, avoiding a 417 MB/1.1 GB read on every phase.
+Set `SPARK_WARC_REFRESH_FINGERPRINTS=1` to force a recompute. Virtual
+environments keep their existing content-based fingerprint because it is cheap
+and captures installed distributions.
+
+HDFS artifact names are content-addressed. The venv archive name already
+contains its fingerprint, so the launcher publishes it under that name instead
+of hashing the archive again. Each phase checks all required HDFS paths with one
+`hdfs dfs -stat` call; missing artifacts are still uploaded individually.
 
 ### Python API
 
@@ -120,6 +139,7 @@ cluster paths, and reusable defaults. `--no-dry-run` overrides `DRY_RUN=1`.
 | Executor count (3; embedding 2) | `--executor-instances` | `SPARK_EXECUTOR_INSTANCES` |
 | Task concurrency (defaults to executor count) | `--parallel-tasks` | `CHUNK_MAX_PARALLEL_TASKS`, `TAG_MAX_PARALLEL_TASKS`, `EMBED_MAX_PARALLEL_TASKS` |
 | Task size and byte bounds | `--items-per-task`, `--input-bytes`, `--result-bytes` | Stage-prefixed `*_ITEMS_PER_TASK`, `*_TASK_INPUT_BYTES`, `*_TASK_RESULT_BYTES` |
+| Per-phase target limits (0 = unlimited) | `--document-limit`, `--analysis-limit`, `--embedding-limit` | `CHUNK_DOCUMENT_LIMIT`, `TAG_ANALYSIS_LIMIT`, `EMBEDDING_LIMIT` |
 | Ingestion selection and budgets | `--year`, `--month`, `--num-files`, `--max-files-per-round`, etc. | Uppercase flag name; see [ingestion controls](../README.md#configuration) |
 | Ingestion resume | `--resume-run-id` | `RESUME_RUN_ID` |
 | Embedding model/settings | `--model`, `--max-length`, `--embedding-batch-size` | `EMBEDDING_MODEL`, `EMBEDDING_MAX_LENGTH`, `EMBEDDING_BATCH_SIZE` |
@@ -147,9 +167,10 @@ limited run, add `--run-limit 50 --starting-embedded N`, where `N` is the
 embedded count recorded before that run started; without a saved baseline, the
 database cannot distinguish that run's remaining work from other pending chunks.
 
-Omit limits to process all pending work. Rerun the same command to resume. The
-chunking document limit counts pending documents, including documents that clean
-to no chunks. The tagging limit counts scheduled chunks, including model errors.
+Omit limits (or set them to `0`) to process all pending work. Rerun the same
+command to resume. The chunking document limit counts pending documents,
+including documents that clean to no chunks. The tagging limit counts scheduled
+chunks, including model errors.
 `--retry-errors` makes previously failed analyses eligible. Terminal `SUCCESS`
 and `NOISE` rows are skipped. Tagging does not implicitly run chunking.
 
@@ -198,8 +219,17 @@ interrupt. A job can finish with recorded per-item ERROR rows; inspect the print
 counts and rerun with `--retry-errors`.
 
 Ctrl+C drains and commits the current small wave before exiting; a second
-interrupt can force an earlier exit. Each batch prints its committed counts,
-while final corpus totals are queried once at the end of the run.
+interrupt can force an earlier exit. Each batch prints its committed counts.
+When a run finishes, the stage prints a `PHASE SUMMARY <stage>` line followed by
+a JSON object containing the units processed by this invocation, the configured
+limit, whether the limit was reached, and the cumulative corpus totals. These
+lines are part of the Spark driver output and appear in the Airflow task log.
+The ingestion phase emits the same pair: its processed unit is the run's
+inserted articles, its JSON includes `invocation_articles` for work done by the
+current invocation, and its totals are `articles` (summed from the ingestion
+run ledger), `live_articles` (a cheap estimate from the live-page partial
+index), and `runs`.  Exact `count(*)` scans over the multi-million-row `pages`
+table are avoided at phase completion.
 
 Speculation is disabled and Spark task retries are limited to one attempt.
 Database outcomes are idempotent, but an external call cannot be committed

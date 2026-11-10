@@ -155,10 +155,53 @@ container took several minutes to start on a memory-constrained worker. The Spar
 itself reports 21.996s; the delay is cluster scheduling/startup latency, not launcher
 work.
 
+## Airflow hardening and Python setup ports (2026-11-10)
+
+The daily DAG `ingestion_pipeline` now has a `probe` task before ingest and wraps
+each launcher call in `jobs.airflow_tasks.launch_stage()`:
+
+* Probe scope: Common Crawl manifest URLs for the run month(s), YARN node health,
+  HDFS root (unless `USE_HDFS_CACHE=0`), and PostgreSQL `pg_isready`.
+* Retries/timeouts: probe 3 retries / 2 min / 2 min timeout; ingest 3 retries /
+  5 min / 24 h; chunk, tag, embed 1 retry / 5 min / 48 h.
+* Exit code 2 is logged as `SOURCES EXHAUSTED` and treated as a successful ingest,
+  so downstream stages can drain existing work. Other failures propagate.
+
+Verified:
+
+* `airflow dags list-import-errors` is clean and
+  `airflow tasks list ingestion_pipeline` shows `probe`, `download_and_enter_db`,
+  `chunk`, `tag`, `embed`.
+* A manual probe against the November 2026 manifest initially received a transient
+  HTTP 503 and went to `up_for_retry`; the automatic retry succeeded. Direct
+  `curl` and later `urllib` checks returned 206.
+* `jobs.airflow_tasks.launch_stage()` returns `succeeded` for ingest and chunk
+  dry runs.
+* The three ported setup/download scripts run against the existing environments:
+  the embedding setup passes `pip check` and the no-torch guard; the embedding
+  model validates with inputs `[input_ids, attention_mask]` and output
+  `last_hidden_state`; the reranker reuses the checksum-verified graph and scores
+  `[6.6368, -11.0271]` for the smoke pair.
+* `.venv/bin/python -m unittest discover -s tests -v`: 185 tests, 64 skipped
+  (optional PostgreSQL/RAG dependencies), 0 failures.
+
+The first live run after the DAG change,
+`scheduled__2026-11-08T22:00:00+00:00`, had its ingest task terminated by SIGTERM
+after about 38 minutes. The cause was not conclusively identified; it was not an
+Airflow retry or the new 24-hour timeout. The probe ran afterwards, hit the
+transient Common Crawl 503, retried, and succeeded, but the run remained failed
+because ingest had failed. The next scheduled run uses the new DAG.
+
+Embedding throughput is still unmeasured at scale. The only recorded evidence is
+two one-chunk runs at roughly 4.8 and 5.3 minutes, dominated by Spark/YARN startup.
+The 48-hour stage timeout is a hang guard, not a validated throughput bound.
+
 ## Remaining work
 
-Measure sustained real-CC-NEWS throughput before raising defaults. There is no
-production before/after throughput comparison in this validation.
+Measure sustained real-CC-NEWS throughput, especially embedding, before raising
+defaults or treating the 48-hour stage timeout as capacity. Retire
+`scripts/supervise_ingest.py` (Phase 6) only after the DAG has survived several real
+runs and retries.
 
 Reproducible local checks are in `tests/test_ingestion.py`, `tests/test_launcher.py`,
 `tests/test_rag_loader.py`, `tests/spark_smoke.py`, `tests/memory_probe.py`, and

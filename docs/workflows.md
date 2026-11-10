@@ -302,7 +302,10 @@ flowchart LR
         I1["print_counts"] & I2["print_progress"] & I3["print_previews"] --> I4["stdout tables (SAMPLE_SIZE rows per table)"]
     end
     subgraph EXPORT["python -m scripts.export_csv"]
-        X1["psycopg COPY of nine tables\n(pages, content, metadata, analyses,\nchunks, embeddings incl. full pgvector…)"] --> X2["exports/ (project root) + copy to /mnt/hgfs/copy_path/warcdb_csv/"]
+        X1["full: psycopg COPY of nine tables\n(pages, content, metadata, analyses,\nchunks, embeddings incl. full pgvector…)"]
+        X1S["--sample N: N random pages +\narticle rows only (no chunks/embeddings)"]
+        X1 --> X2["exports/ (project root) + copy to /mnt/hgfs/copy_path/warcdb_csv/"]
+        X1S --> X3["exports/sample-N (no HGFS copy by default)"]
     end
     subgraph WATCH["watch_embeddings.py"]
         W1["read_counts(chunking_version, model, embedding_version)"] --> W2["remaining(eligible, embedded, run_limit…)"] --> W3{"--once?"}
@@ -368,6 +371,33 @@ flowchart LR
 
 ---
 
+## 11. Airflow daily DAG (`ingestion_pipeline`)
+
+The DAG schedules the launcher stages. The probe is a separate task so an outage
+retries cheaply before any Spark work starts.
+
+```mermaid
+flowchart TD
+    S["@daily schedule\nor backfill / manual trigger"] --> P["probe\nCommon Crawl manifests + YARN + HDFS + PostgreSQL"]
+    P -- "ok" --> I["download_and_enter_db\nlaunch_stage('ingest') for each month"]
+    P -. "5xx / network / node down" .-> PR["up_for_retry\n3 attempts, 2 min apart"]
+    PR -.-> P
+    I -- "exit 0" --> C["chunk\nlaunch_stage('chunk')"]
+    I -. "exit 2" .-> W["SOURCES EXHAUSTED\nlog warning, task succeeds"]
+    W --> C
+    C --> T["tag\nlaunch_stage('tag')"]
+    T --> E["embed\nlaunch_stage('embed')"]
+    C -. "retry 1x, 5 min" .-> C
+    T -. "retry 1x, 5 min" .-> T
+    E -. "retry 1x, 5 min" .-> E
+```
+
+Backfills create one run per day in the requested range; a single mid-month day
+targets one month because the ingest task uses the run's data interval. The DAG
+has no `year`/`month` params.
+
+---
+
 ## Diagram index
 
 | § | Workflow | Entry point |
@@ -382,3 +412,4 @@ flowchart LR
 | 8 | Launcher / deployment | `jobs.launcher` |
 | 9 | Operational tools | `python -m db.inspect`, `python -m scripts.export_csv`, `scripts/watch_embeddings.py`, `scripts/vector_search_test.py` |
 | 10 | State machines | persisted tables |
+| 11 | Airflow daily DAG | `airflow/dags/ingestion.py` |
